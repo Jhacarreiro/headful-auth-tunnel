@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+profiles/
+profile/
+certs/
+*.pid
+*.log
+.token
+.env
+last-auth.json
+.DS_Store

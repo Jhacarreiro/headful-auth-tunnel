@@ -1,0 +1,17 @@
+[project]
+name = "scrapling-headful-tunnel"
+version = "0.1.0"
+description = "LAN/VPN remote-control tunnel for human-operated headful Scrapling browser sessions with persistent profiles."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "João Carreiro" }]
+keywords = ["scrapling", "headful", "browser", "persistent-profile", "remote-control", "auth-tunnel"]
+dependencies = ["scrapling"]
+
+[project.urls]
+Homepage = "https://github.com/Jhacarreiro/scrapling-headful-tunnel"
+Repository = "https://github.com/Jhacarreiro/scrapling-headful-tunnel"
+
+[project.scripts]
+scrapling-headful-tunnel = "scrapling_headful_tunnel.server:main"
