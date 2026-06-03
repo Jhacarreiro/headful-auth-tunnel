@@ -1,6 +1,6 @@
 [project]
 name = "headful-auth-tunnel"
-version = "0.1.0"
+version = "0.2.0"
 description = "LAN/VPN remote-control tunnel for human-operated headful Scrapling browser sessions with persistent profiles."
 readme = "README.md"
 requires-python = ">=3.10"

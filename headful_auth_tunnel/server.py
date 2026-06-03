@@ -48,22 +48,23 @@ HTML = r'''<!doctype html>
     #wrap { width:96vw; margin:8px; border:2px solid #444; overflow:auto; background:#000; }
     #screen { display:block; width:100%; height:auto; cursor:crosshair; touch-action:none; }
     #status { width:100%; box-sizing:border-box; padding:8px 10px; font-size:12px; color:#D4FF00; }
+    .hidden { display:none; }
+    .primary { background:#D4FF00; color:#000; }
+    .assist { background:#00d4ff; color:#000; }
   </style>
 </head>
 <body>
   <div id="bar">
     <input id="urlInput" value="BASE_URL_PLACEHOLDER">
-    <button onclick="gotoUrl()">GO</button>
+    <button class="primary" onclick="gotoUrl()">GO</button>
     <button class="secondary" onclick="goBack()">BACK</button>
-    <button class="secondary" onclick="sendKey('Enter')">ENTER</button>
-    <button class="secondary" onclick="sendKey('Tab')">TAB</button>
-    <button class="secondary" onclick="sendKey('Backspace')">BACKSPACE</button>
-    <button class="secondary" onclick="sendKey('Control+A')">CTRL+A</button>
-    <button class="secondary" onclick="clearField()">CLEAR FIELD</button>
-    <button class="secondary" onclick="pastePrompt()">PASTE PROMPT</button>
-    <textarea id="typeInput" placeholder="write here; then SEND TEXT" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false"></textarea>
-    <button class="secondary" onclick="sendTextBox()">SEND TEXT</button>
-    <button class="secondary" onclick="clearLocalText()">CLEAR LOCAL</button>
+    <textarea id="typeInput" placeholder="paste/type here; SEND writes to browser" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false"></textarea>
+    <button class="secondary" onclick="sendTextBox()">SEND</button>
+    <button class="secondary" onclick="pastePrompt()">PASTE</button>
+    <button class="secondary" onclick="clearField()">CLEAR</button>
+    <button id="dragAssistBtn" class="assist" onclick="setCoordMode()">DRAG ASSIST</button>
+    <button id="runDragBtn" class="assist hidden" onclick="runCoordDrag()">RUN DRAG</button>
+    <button id="cancelDragBtn" class="secondary hidden" onclick="clearCoordDrag()">CANCEL</button>
     <button class="done" onclick="done()">DONE</button>
   </div>
   <div id="wrap"><img id="screen" alt="remote browser screenshot"></div>
@@ -72,6 +73,9 @@ HTML = r'''<!doctype html>
 const statusEl = document.getElementById('status');
 const screen = document.getElementById('screen');
 const typeInput = document.getElementById('typeInput');
+const dragAssistBtn = document.getElementById('dragAssistBtn');
+const runDragBtn = document.getElementById('runDragBtn');
+const cancelDragBtn = document.getElementById('cancelDragBtn');
 let lastObjectUrl = null;
 let busy = false;
 let token = new URLSearchParams(location.search).get('token') || localStorage.getItem('cgpt_token') || '';
@@ -99,19 +103,136 @@ async function refresh() {
     statusEl.textContent = 'stream ' + new Date().toLocaleTimeString();
   } catch (e) { statusEl.textContent = 'stream error: ' + e.message; }
 }
-function coords(e) {
-  e.preventDefault();
+function eventCoords(e) {
   const rect = screen.getBoundingClientRect();
   // Browser mouse expects CSS viewport coordinates, not DPR-scaled screenshot pixels.
   const naturalW = 1440;
   const naturalH = 1100;
-  const p = e.touches && e.touches[0] ? e.touches[0] : e;
-  const x = Math.round((p.clientX - rect.left) * naturalW / rect.width);
-  const y = Math.round((p.clientY - rect.top) * naturalH / rect.height);
+  const p = e.touches && e.touches[0] ? e.touches[0] : (e.changedTouches && e.changedTouches[0] ? e.changedTouches[0] : e);
+  const x = Math.max(0, Math.min(naturalW - 1, Math.round((p.clientX - rect.left) * naturalW / rect.width)));
+  const y = Math.max(0, Math.min(naturalH - 1, Math.round((p.clientY - rect.top) * naturalH / rect.height)));
+  return {x, y};
+}
+let dragging = false;
+let lastMoveSent = 0;
+let refreshTimer = null;
+let coordMode = false;
+let coordStart = null;
+let coordEnd = null;
+let mouseQueue = Promise.resolve();
+function setRefresh(ms) {
+  if (refreshTimer) clearInterval(refreshTimer);
+  refreshTimer = setInterval(refresh, ms);
+}
+function mouseApi(action, x, y) {
+  mouseQueue = mouseQueue.then(async () => {
+    const r = await fetch('/mouse' + qs(), { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({action, x, y}) });
+    if (!r.ok) throw new Error(await r.text());
+    return await r.json();
+  }).catch(err => { statusEl.textContent = 'mouse error: ' + err.message; });
+  return mouseQueue;
+}
+function pointerDown(e) {
+  e.preventDefault();
+  const {x, y} = eventCoords(e);
+  if (coordMode) {
+    if (!coordStart) {
+      coordStart = {x, y};
+      statusEl.textContent = `coord drag start ${x}, ${y}; click end point then RUN COORD DRAG`;
+    } else {
+      coordEnd = {x, y};
+      statusEl.textContent = `coord drag end ${x}, ${y}; press RUN COORD DRAG`;
+    }
+    return;
+  }
+  dragging = true;
+  lastMoveSent = 0;
+  if (e.pointerId !== undefined && screen.setPointerCapture) screen.setPointerCapture(e.pointerId);
+  setRefresh(250);
+  statusEl.textContent = `mouse down ${x}, ${y}`;
+  mouseApi('down', x, y);
+}
+function pointerMove(e) {
+  if (!dragging) return;
+  e.preventDefault();
+  const now = Date.now();
+  if (now - lastMoveSent < 35) return;
+  lastMoveSent = now;
+  const {x, y} = eventCoords(e);
+  statusEl.textContent = `drag ${x}, ${y}`;
+  mouseApi('move', x, y);
+}
+function pointerUp(e) {
+  if (!dragging) return;
+  e.preventDefault();
+  const {x, y} = eventCoords(e);
+  dragging = false;
+  if (e.pointerId !== undefined && screen.releasePointerCapture) {
+    try { screen.releasePointerCapture(e.pointerId); } catch (_) {}
+  }
+  setRefresh(1600);
+  statusEl.textContent = `mouse up ${x}, ${y}`;
+  mouseApi('up', x, y).then(refresh);
+}
+function clickFallback(e) {
+  e.preventDefault();
+  const {x, y} = eventCoords(e);
   statusEl.textContent = `click ${x}, ${y}`;
   api('/click', {x, y}).catch(err => statusEl.textContent = 'click error: ' + err.message);
 }
-if (window.PointerEvent) screen.addEventListener('pointerdown', coords); else { screen.addEventListener('touchstart', coords, {passive:false}); screen.addEventListener('click', coords); }
+if (window.PointerEvent) {
+  screen.addEventListener('pointerdown', pointerDown);
+  screen.addEventListener('pointermove', pointerMove);
+  screen.addEventListener('pointerup', pointerUp);
+  screen.addEventListener('pointercancel', pointerUp);
+} else {
+  screen.addEventListener('touchstart', pointerDown, {passive:false});
+  screen.addEventListener('touchmove', pointerMove, {passive:false});
+  screen.addEventListener('touchend', pointerUp, {passive:false});
+  screen.addEventListener('mousedown', pointerDown);
+  screen.addEventListener('mousemove', pointerMove);
+  screen.addEventListener('mouseup', pointerUp);
+  screen.addEventListener('click', clickFallback);
+}
+function updateDragControls(active) {
+  dragAssistBtn.classList.toggle('hidden', active);
+  runDragBtn.classList.toggle('hidden', !active);
+  cancelDragBtn.classList.toggle('hidden', !active);
+}
+function setCoordMode() {
+  coordMode = true;
+  coordStart = null;
+  coordEnd = null;
+  dragging = false;
+  updateDragControls(true);
+  setRefresh(1600);
+  statusEl.textContent = 'drag assist: click START on the screenshot, click END, then RUN DRAG';
+}
+function clearCoordDrag() {
+  coordMode = false;
+  coordStart = null;
+  coordEnd = null;
+  updateDragControls(false);
+  statusEl.textContent = 'drag assist cancelled; normal mode';
+}
+async function runCoordDrag() {
+  if (!coordStart || !coordEnd) {
+    statusEl.textContent = 'coord drag needs start and end points first';
+    return;
+  }
+  const payload = {x1:coordStart.x, y1:coordStart.y, x2:coordEnd.x, y2:coordEnd.y, steps:32, durationMs:700};
+  if (!confirm(`Run drag from ${payload.x1},${payload.y1} to ${payload.x2},${payload.y2}?`)) return;
+  statusEl.textContent = `running coord drag ${payload.x1},${payload.y1} -> ${payload.x2},${payload.y2}`;
+  try {
+    const r = await api('/drag', payload);
+    statusEl.textContent = `coord drag done: ${r.x1},${r.y1} -> ${r.x2},${r.y2}`;
+    coordMode = false;
+    coordStart = null;
+    coordEnd = null;
+    updateDragControls(false);
+    await refresh();
+  } catch (err) { statusEl.textContent = 'coord drag error: ' + err.message; }
+}
 async function sendTextBox() {
   const text = typeInput.value;
   if (!text) { statusEl.textContent = 'local type box is empty'; return; }
@@ -139,7 +260,7 @@ function gotoUrl() { api('/goto', {url: document.getElementById('urlInput').valu
 function goBack() { api('/back', {}).then(r => statusEl.textContent = 'back: ' + (r.url || 'ok')).catch(err => statusEl.textContent = 'back error: ' + err.message); }
 function pastePrompt() { const text = prompt('Paste text'); if (text) api('/type', {text}).catch(err => statusEl.textContent = err.message); }
 async function done() { if (!confirm('Save session marker?')) return; const j = await api('/done', {}); alert(JSON.stringify(j)); }
-setInterval(refresh, 1600); refresh();
+setRefresh(1600); refresh();
 </script>
 </body>
 </html>'''
@@ -270,6 +391,39 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 print(f'CLICK x={x} y={y}', flush=True)
                 page.mouse.click(x, y)
                 self.send_json({'ok': True, 'x': x, 'y': y})
+            elif parsed.path == '/mouse':
+                action = str(payload.get('action', 'move')).lower()
+                x = max(0, min(1439, int(payload.get('x', 0))))
+                y = max(0, min(1099, int(payload.get('y', 0))))
+                print(f'MOUSE action={action} x={x} y={y}', flush=True)
+                if action == 'down':
+                    page.mouse.move(x, y)
+                    page.mouse.down()
+                elif action == 'move':
+                    page.mouse.move(x, y)
+                elif action == 'up':
+                    page.mouse.move(x, y)
+                    page.mouse.up()
+                else:
+                    self.send_response(400); self.end_headers(); self.wfile.write(b'unknown mouse action'); return
+                self.send_json({'ok': True, 'action': action, 'x': x, 'y': y})
+            elif parsed.path == '/drag':
+                x1 = max(0, min(1439, int(payload.get('x1', 0))))
+                y1 = max(0, min(1099, int(payload.get('y1', 0))))
+                x2 = max(0, min(1439, int(payload.get('x2', x1))))
+                y2 = max(0, min(1099, int(payload.get('y2', y1))))
+                steps = max(2, min(80, int(payload.get('steps', 32))))
+                duration_ms = max(50, min(3000, int(payload.get('durationMs', 700))))
+                print(f'DRAG x1={x1} y1={y1} x2={x2} y2={y2} steps={steps} durationMs={duration_ms}', flush=True)
+                page.mouse.move(x1, y1)
+                page.mouse.down()
+                for i in range(1, steps + 1):
+                    x = round(x1 + (x2 - x1) * i / steps)
+                    y = round(y1 + (y2 - y1) * i / steps)
+                    page.mouse.move(x, y)
+                    time.sleep(duration_ms / steps / 1000.0)
+                page.mouse.up()
+                self.send_json({'ok': True, 'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2, 'steps': steps, 'durationMs': duration_ms})
             elif parsed.path == '/type':
                 text = str(payload.get('text', ''))
                 print(f'TYPE chars={len(text)}', flush=True)

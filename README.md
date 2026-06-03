@@ -9,7 +9,7 @@ Use it when automation runs on a headless server, but a person needs to manually
 - Headful Scrapling `StealthySession`.
 - Persistent browser profile directory.
 - Screenshot stream in a simple browser UI.
-- Remote click, type, key, paste, clear-field, back and URL navigation controls.
+- Remote click, human drag/pointer control, type, key, paste, clear-field, back and URL navigation controls.
 - URL token authentication.
 - Optional direct HTTPS with a local/self-signed certificate.
 - Intended for LAN/VPN, not public internet exposure.
@@ -45,6 +45,10 @@ TOKEN_FILE=$PWD/.token \
 ```
 
 Open the printed URL from a browser that can reach the host.
+
+### Human drag / slider-friendly control
+
+The web UI supports real pointer down / move / up events over the screenshot view. During a drag gesture, screenshot refresh is temporarily increased so a human can operate drag-based controls more reliably. This is for manual human control only; the project does not solve or bypass CAPTCHAs or anti-bot checks.
 
 ## HTTPS
 
