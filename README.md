@@ -1,4 +1,4 @@
-# scrapling-headful-tunnel
+# headful-auth-tunnel
 
 A small LAN/VPN-only remote-control tunnel for **human-operated, headful Scrapling browser sessions** with persistent profiles.
 

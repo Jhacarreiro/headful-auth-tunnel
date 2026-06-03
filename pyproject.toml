@@ -1,5 +1,5 @@
 [project]
-name = "scrapling-headful-tunnel"
+name = "headful-auth-tunnel"
 version = "0.1.0"
 description = "LAN/VPN remote-control tunnel for human-operated headful Scrapling browser sessions with persistent profiles."
 readme = "README.md"
@@ -10,8 +10,8 @@ keywords = ["scrapling", "headful", "browser", "persistent-profile", "remote-con
 dependencies = ["scrapling"]
 
 [project.urls]
-Homepage = "https://github.com/Jhacarreiro/scrapling-headful-tunnel"
-Repository = "https://github.com/Jhacarreiro/scrapling-headful-tunnel"
+Homepage = "https://github.com/Jhacarreiro/headful-auth-tunnel"
+Repository = "https://github.com/Jhacarreiro/headful-auth-tunnel"
 
 [project.scripts]
-scrapling-headful-tunnel = "scrapling_headful_tunnel.server:main"
+headful-auth-tunnel = "headful_auth_tunnel.server:main"

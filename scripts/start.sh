@@ -27,7 +27,7 @@ fi
 if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
   echo "already-running pid=$(cat "$PID_FILE")"
 else
-  TOKEN=$(cat "$TOKEN_FILE") DISPLAY="$DISPLAY" PROFILE_DIR="$PROFILE_DIR" OUT_DIR="$OUT_DIR" PORT="$PORT" nohup python3 -m scrapling_headful_tunnel.server > "$LOG_FILE" 2>&1 &
+  TOKEN=$(cat "$TOKEN_FILE") DISPLAY="$DISPLAY" PROFILE_DIR="$PROFILE_DIR" OUT_DIR="$OUT_DIR" PORT="$PORT" nohup python3 -m headful_auth_tunnel.server > "$LOG_FILE" 2>&1 &
   echo $! > "$PID_FILE"
   sleep 3
 fi
