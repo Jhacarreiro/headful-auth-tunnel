@@ -1,10 +1,40 @@
 # Changelog
 
+## 0.4.0 - 2026-07-12
+
+### Security
+
+- Replace URL/local-storage token propagation with a login form and random `HttpOnly`, `SameSite=Strict` session cookie.
+- Keep legacy query-string authentication disabled by default and redact query strings from access logs.
+- Add constant-time bearer-token comparison, request-size limits, socket timeouts, no-store responses, CSP, clickjacking protection, MIME sniffing protection and strict referrer policy.
+- Allow public websites by default while blocking loopback, private, link-local, reserved and common internal destinations.
+- Apply destination policy to top-level navigation, redirects, subresources and WebSockets, with explicit allow/deny overrides.
+- Keep sensitive DOM values out of routine snapshots while allowing the authenticated operator to reveal them explicitly for login, OTP and token workflows.
+
+### Browser control
+
+- Make viewport, locale and timezone configuration effective while preserving `1440×1100`, `pt-PT` and `Europe/Lisbon` defaults.
+- Add runtime viewport editing up to `7680×4320`.
+- Scale pointer coordinates from the screenshot's real dimensions; validate end-to-end at `3840×2160`.
+- Add tab/popup listing, focus and close operations.
+- Add DOM snapshot, selector fill, click, press and select operations, including explicit sensitive-value inspection.
+- Keep one live headful Chromium context for every tunnel process and reuse the same persistent profile across restarts.
+- Move Playwright work to a dedicated browser thread so concurrent HTTP clients cannot cross Playwright thread boundaries.
+
+### Operations and packaging
+
+- Preserve the existing `127.0.0.1:19192` network defaults.
+- Harden start/stop scripts with PID ownership checks, Xvfb lifecycle tracking and readiness checks.
+- Add token-display and foreground-run helpers.
+- Add explicit PEP 517 build metadata, bounded Scrapling dependency and Python 3.10–3.14 classifiers.
+- Add Docker, Docker Compose and systemd examples.
+- Add pytest coverage, Ruff, ShellCheck, GitHub Actions CI, Dependabot and tagged-release builds.
+
 ## 0.2.0 - 2026-06-03
 
 - Add human drag/pointer support with real pointer down / move / up events.
-- Add coordinate-based drag assist for high-latency sessions: select start/end points on a screenshot, then execute the drag locally in the browser.
-- Simplify the remote-control UI around the common human handoff actions: GO, BACK, SEND, PASTE, CLEAR, DRAG ASSIST, DONE.
+- Add coordinate-based drag assist for high-latency sessions.
+- Simplify the remote-control UI around common human handoff actions.
 - Document slider-friendly human control while keeping CAPTCHA/anti-bot bypass as a non-goal.
 
 ## 0.1.0 - Initial public release
