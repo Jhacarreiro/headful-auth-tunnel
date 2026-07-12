@@ -1,0 +1,201 @@
+# HTTP API
+
+## Authentication
+
+Browser sessions use the cookie returned by `POST /session`. Programmatic clients may send:
+
+```http
+Authorization: Bearer <access-token>
+```
+
+`GET /health`, `GET /`, `GET /app.css` and `POST /session` are available before authentication. All browser-control and state endpoints require authentication.
+
+All JSON request bodies must be objects. The default maximum body size is 1 MiB.
+
+## Error format
+
+```json
+{"error":"Human-readable error"}
+```
+
+Common status codes:
+
+- `400` invalid input;
+- `401` missing or invalid authentication;
+- `403` destination policy rejection;
+- `404` unknown endpoint or tab;
+- `409` invalid state, such as closing the last tab;
+- `413` request body too large;
+- `500` unexpected browser/server failure;
+- `503` degraded health or a full command queue.
+
+## Session endpoints
+
+### `POST /session`
+
+Accepts form data or JSON:
+
+```json
+{"token":"access-token"}
+```
+
+Returns `303 See Other` and sets the session cookie.
+
+### `POST /logout`
+
+Revokes the current session cookie and redirects to `/`.
+
+## State and screenshots
+
+### `GET /health`
+
+Returns:
+
+```json
+{"status":"ok"}
+```
+
+With `EXPOSE_HEALTH_DETAILS=true`, browser and tab counts are included.
+
+### `GET /meta`
+
+Returns the active URL/title, viewport, locale, timezone, browser mode, persistent-profile flag and browser instance identifier.
+
+### `GET /screenshot`
+
+Returns a PNG of the current viewport.
+
+### `GET /tabs`
+
+Returns all open pages:
+
+```json
+{
+  "tabs": [
+    {"id":"7f...","title":"Example","url":"https://example.com","active":true}
+  ]
+}
+```
+
+### `GET /page`
+
+Returns a DOM snapshot without field values.
+
+### `POST /page`
+
+```json
+{
+  "include_values": true,
+  "include_sensitive_values": false
+}
+```
+
+Set `include_sensitive_values` only when the authenticated operator explicitly needs password, token or OTP values.
+
+## Navigation
+
+### `POST /navigate`
+
+```json
+{"url":"https://example.com/login"}
+```
+
+The URL must pass the destination policy.
+
+### `POST /reload`
+
+Empty JSON object.
+
+### `POST /history/back`
+
+Empty JSON object.
+
+### `POST /history/forward`
+
+Empty JSON object.
+
+## Viewport and pointer
+
+### `POST /viewport`
+
+```json
+{"width":1920,"height":1200}
+```
+
+Supported range: width 320–7680, height 240–4320.
+
+### `POST /click`
+
+```json
+{"x":400,"y":300}
+```
+
+### `POST /drag`
+
+```json
+{
+  "from":{"x":300,"y":500},
+  "to":{"x":900,"y":500},
+  "duration_ms":500
+}
+```
+
+## Keyboard
+
+### `POST /type`
+
+```json
+{"text":"user@example.com"}
+```
+
+### `POST /key`
+
+```json
+{"key":"Control+A"}
+```
+
+Key names use Playwright keyboard syntax.
+
+## Tabs
+
+### `POST /tabs/focus`
+
+```json
+{"id":"7f..."}
+```
+
+### `POST /tabs/close`
+
+```json
+{"id":"7f..."}
+```
+
+The final remaining tab cannot be closed.
+
+## Selector helpers
+
+### `POST /dom/fill`
+
+```json
+{"selector":"input[name=email]","value":"user@example.com"}
+```
+
+### `POST /dom/click`
+
+```json
+{"selector":"button[type=submit]"}
+```
+
+### `POST /dom/press`
+
+```json
+{"selector":"input[name=otp]","key":"Enter"}
+```
+
+### `POST /dom/select`
+
+```json
+{"selector":"select[name=country]","value":"PT"}
+```
+
+These helpers act on the first matching element and use a 10-second operation timeout.

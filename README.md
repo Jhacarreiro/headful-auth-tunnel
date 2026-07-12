@@ -23,6 +23,15 @@ It is useful when automation runs on a headless machine, but a person must occas
 - Optional direct TLS.
 - Docker, systemd, lifecycle scripts, tests, CI, Dependabot and tagged-release builds.
 
+
+## Documentation
+
+- [Architecture](docs/architecture.md)
+- [HTTP API reference](docs/api.md)
+- [Security policy](SECURITY.md)
+- [Contributing](CONTRIBUTING.md)
+- [Changelog](CHANGELOG.md)
+
 ## Non-goals
 
 This project does not solve or bypass CAPTCHAs, anti-bot protections, access controls, paywalls or rate limits. It is a human-control bridge for accounts and systems you are allowed to use.
@@ -264,6 +273,33 @@ sudo systemctl enable --now headful-auth-tunnel
 - `TOKEN` is replaced by `AUTH_TOKEN`; `TOKEN_FILE` remains preferred.
 - Private/internal destinations are blocked unless explicitly allowed.
 - Screenshots are PNG rather than compressed JPEG.
+
+
+## Troubleshooting
+
+### The browser does not start
+
+Run `python -m patchright install --with-deps chromium` and confirm Xvfb is installed. With the helper scripts, inspect `runtime/tunnel.log` and `runtime/xvfb.log`.
+
+### The service works locally but not through Docker
+
+The process inside the container must bind `0.0.0.0:19192`. The supplied image and Compose example already set this. Keep the host-side publish address at `127.0.0.1` unless a LAN/VPN client must connect.
+
+### Chromium reports that the profile is in use
+
+Only one browser process may own a profile directory. Stop the previous tunnel and verify its Chromium/Xvfb processes are gone before starting another process with the same `PROFILE_DIR`.
+
+### An internal callback or login host is blocked
+
+Add the exact hostname to `ALLOWED_HOSTS`. Prefer a narrow allowlist entry over `ALLOW_PRIVATE_NETWORK_NAVIGATION=true`.
+
+### The login session disappears after restart
+
+Confirm that every start uses the same `PROFILE_DIR` and that the directory is writable by the service user. In Docker, mount `/data/profile` as a persistent volume.
+
+### The token is rejected
+
+Use `./scripts/show-token.sh` to read the configured token file. When running the Python entry point directly, confirm that `TOKEN_FILE` or `AUTH_TOKEN` points to the same value used by the client.
 
 ## Development
 
