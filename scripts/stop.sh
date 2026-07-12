@@ -1,13 +1,38 @@
-#!/usr/bin/env sh
+#!/bin/sh
 set -eu
-ROOT=${ROOT:-$(pwd)}
-PID_FILE=${PID_FILE:-$ROOT/tunnel.pid}
-if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
-  kill "$(cat "$PID_FILE")" || true
-  sleep 2
-  if kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then kill -9 "$(cat "$PID_FILE")" || true; fi
-  echo "stopped pid=$(cat "$PID_FILE")"
-else
-  echo "not-running"
-fi
-rm -f "$PID_FILE"
+
+ROOT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+RUNTIME_DIR=${RUNTIME_DIR:-$ROOT_DIR/runtime}
+PID_FILE=${PID_FILE:-$RUNTIME_DIR/tunnel.pid}
+XVFB_PID_FILE=${XVFB_PID_FILE:-$RUNTIME_DIR/xvfb.pid}
+
+stop_owned_process() {
+  pid_file=$1
+  pattern=$2
+  label=$3
+  [ -f "$pid_file" ] || return 0
+  pid=$(cat "$pid_file" 2>/dev/null || true)
+  if [ -z "$pid" ] || [ ! -r "/proc/$pid/cmdline" ]; then
+    rm -f "$pid_file"
+    return 0
+  fi
+  if ! tr '\000' ' ' < "/proc/$pid/cmdline" | grep -F "$pattern" >/dev/null 2>&1; then
+    echo "Refusing to stop pid $pid: it is not $label" >&2
+    rm -f "$pid_file"
+    return 1
+  fi
+  kill "$pid" 2>/dev/null || true
+  i=0
+  while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 40 ]; do
+    sleep 0.25
+    i=$((i + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+  rm -f "$pid_file"
+  echo "Stopped $label (pid $pid)"
+}
+
+stop_owned_process "$PID_FILE" "headful" "Headful Auth Tunnel"
+stop_owned_process "$XVFB_PID_FILE" "Xvfb" "Xvfb"
