@@ -360,15 +360,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if parsed.path == '/screenshot':
             if not authorized(self):
                 self.send_response(403); self.end_headers(); self.wfile.write(b'Forbidden'); return
-            with state.lock:
-                state.start()
-                data = state.page.screenshot(type='jpeg', quality=58, full_page=False)
-            self.send_response(200)
-            self.send_header('Content-Type', 'image/jpeg')
-            self.send_header('Cache-Control', 'no-store')
-            self.send_header('Content-Length', str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
+            try:
+                with state.lock:
+                    state.start()
+                    data = state.page.screenshot(type='jpeg', quality=58, full_page=False)
+                self.send_response(200)
+                self.send_header('Content-Type', 'image/jpeg')
+                self.send_header('Cache-Control', 'no-store')
+                self.send_header('Content-Length', str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+            except Exception as e:
+                self.send_json({'ok': False, 'error': str(e)}, 502)
             return
         self.send_response(404); self.end_headers(); self.wfile.write(b'Not found')
 
@@ -383,74 +386,78 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except Exception:
             payload = {}
         with state.lock:
-            state.start()
-            page = state.page
-            if parsed.path == '/click':
-                x = max(0, min(1439, int(payload.get('x', 0))))
-                y = max(0, min(1099, int(payload.get('y', 0))))
-                print(f'CLICK x={x} y={y}', flush=True)
-                page.mouse.click(x, y)
-                self.send_json({'ok': True, 'x': x, 'y': y})
-            elif parsed.path == '/mouse':
-                action = str(payload.get('action', 'move')).lower()
-                x = max(0, min(1439, int(payload.get('x', 0))))
-                y = max(0, min(1099, int(payload.get('y', 0))))
-                print(f'MOUSE action={action} x={x} y={y}', flush=True)
-                if action == 'down':
-                    page.mouse.move(x, y)
+            try:
+                state.start()
+                page = state.page
+                if parsed.path == '/click':
+                    x = max(0, min(1439, int(payload.get('x', 0))))
+                    y = max(0, min(1099, int(payload.get('y', 0))))
+                    print(f'CLICK x={x} y={y}', flush=True)
+                    page.mouse.click(x, y)
+                    self.send_json({'ok': True, 'x': x, 'y': y})
+                elif parsed.path == '/mouse':
+                    action = str(payload.get('action', 'move')).lower()
+                    x = max(0, min(1439, int(payload.get('x', 0))))
+                    y = max(0, min(1099, int(payload.get('y', 0))))
+                    print(f'MOUSE action={action} x={x} y={y}', flush=True)
+                    if action == 'down':
+                        page.mouse.move(x, y)
+                        page.mouse.down()
+                    elif action == 'move':
+                        page.mouse.move(x, y)
+                    elif action == 'up':
+                        page.mouse.move(x, y)
+                        page.mouse.up()
+                    else:
+                        self.send_response(400); self.end_headers(); self.wfile.write(b'unknown mouse action'); return
+                    self.send_json({'ok': True, 'action': action, 'x': x, 'y': y})
+                elif parsed.path == '/drag':
+                    x1 = max(0, min(1439, int(payload.get('x1', 0))))
+                    y1 = max(0, min(1099, int(payload.get('y1', 0))))
+                    x2 = max(0, min(1439, int(payload.get('x2', x1))))
+                    y2 = max(0, min(1099, int(payload.get('y2', y1))))
+                    steps = max(2, min(80, int(payload.get('steps', 32))))
+                    duration_ms = max(50, min(3000, int(payload.get('durationMs', 700))))
+                    print(f'DRAG x1={x1} y1={y1} x2={x2} y2={y2} steps={steps} durationMs={duration_ms}', flush=True)
+                    page.mouse.move(x1, y1)
                     page.mouse.down()
-                elif action == 'move':
-                    page.mouse.move(x, y)
-                elif action == 'up':
-                    page.mouse.move(x, y)
+                    for i in range(1, steps + 1):
+                        x = round(x1 + (x2 - x1) * i / steps)
+                        y = round(y1 + (y2 - y1) * i / steps)
+                        page.mouse.move(x, y)
+                        time.sleep(duration_ms / steps / 1000.0)
                     page.mouse.up()
+                    self.send_json({'ok': True, 'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2, 'steps': steps, 'durationMs': duration_ms})
+                elif parsed.path == '/type':
+                    text = str(payload.get('text', ''))
+                    print(f'TYPE chars={len(text)}', flush=True)
+                    page.keyboard.type(text)
+                    self.send_json({'ok': True, 'chars': len(text)})
+                elif parsed.path == '/key':
+                    key = str(payload.get('key', 'Enter'))
+                    print(f'KEY key={key}', flush=True)
+                    page.keyboard.press(key)
+                    self.send_json({'ok': True, 'key': key})
+                elif parsed.path == '/goto':
+                    url = str(payload.get('url', BASE_URL))
+                    if not url.startswith('http'):
+                        url = 'https://' + url
+                    page.goto(url, wait_until='domcontentloaded', timeout=30000)
+                    self.send_json({'ok': True, 'url': page.url})
+                elif parsed.path == '/back':
+                    print('BACK', flush=True)
+                    page.go_back(wait_until='domcontentloaded', timeout=15000)
+                    self.send_json({'ok': True, 'url': page.url})
+                elif parsed.path == '/done':
+                    cookies = state.session.context.cookies()
+                    marker = {'savedAt': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), 'engine': 'scrapling-stealthy', 'profile': PROFILE, 'url': page.url, 'title': page.title(), 'cookieCount': len(cookies)}
+                    (OUT / 'last-auth.json').write_text(json.dumps(marker, ensure_ascii=False, indent=2))
+                    self.send_json({'ok': True, 'marker': marker})
                 else:
-                    self.send_response(400); self.end_headers(); self.wfile.write(b'unknown mouse action'); return
-                self.send_json({'ok': True, 'action': action, 'x': x, 'y': y})
-            elif parsed.path == '/drag':
-                x1 = max(0, min(1439, int(payload.get('x1', 0))))
-                y1 = max(0, min(1099, int(payload.get('y1', 0))))
-                x2 = max(0, min(1439, int(payload.get('x2', x1))))
-                y2 = max(0, min(1099, int(payload.get('y2', y1))))
-                steps = max(2, min(80, int(payload.get('steps', 32))))
-                duration_ms = max(50, min(3000, int(payload.get('durationMs', 700))))
-                print(f'DRAG x1={x1} y1={y1} x2={x2} y2={y2} steps={steps} durationMs={duration_ms}', flush=True)
-                page.mouse.move(x1, y1)
-                page.mouse.down()
-                for i in range(1, steps + 1):
-                    x = round(x1 + (x2 - x1) * i / steps)
-                    y = round(y1 + (y2 - y1) * i / steps)
-                    page.mouse.move(x, y)
-                    time.sleep(duration_ms / steps / 1000.0)
-                page.mouse.up()
-                self.send_json({'ok': True, 'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2, 'steps': steps, 'durationMs': duration_ms})
-            elif parsed.path == '/type':
-                text = str(payload.get('text', ''))
-                print(f'TYPE chars={len(text)}', flush=True)
-                page.keyboard.type(text)
-                self.send_json({'ok': True, 'chars': len(text)})
-            elif parsed.path == '/key':
-                key = str(payload.get('key', 'Enter'))
-                print(f'KEY key={key}', flush=True)
-                page.keyboard.press(key)
-                self.send_json({'ok': True, 'key': key})
-            elif parsed.path == '/goto':
-                url = str(payload.get('url', BASE_URL))
-                if not url.startswith('http'):
-                    url = 'https://' + url
-                page.goto(url, wait_until='domcontentloaded', timeout=30000)
-                self.send_json({'ok': True, 'url': page.url})
-            elif parsed.path == '/back':
-                print('BACK', flush=True)
-                page.go_back(wait_until='domcontentloaded', timeout=15000)
-                self.send_json({'ok': True, 'url': page.url})
-            elif parsed.path == '/done':
-                cookies = state.session.context.cookies()
-                marker = {'savedAt': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), 'engine': 'scrapling-stealthy', 'profile': PROFILE, 'url': page.url, 'title': page.title(), 'cookieCount': len(cookies)}
-                (OUT / 'last-auth.json').write_text(json.dumps(marker, ensure_ascii=False, indent=2))
-                self.send_json({'ok': True, 'marker': marker})
-            else:
-                self.send_response(404); self.end_headers(); self.wfile.write(b'Not found')
+                    self.send_response(404); self.end_headers(); self.wfile.write(b'Not found')
+            except Exception as e:
+                print(f'ERROR {parsed.path}: {e}', flush=True)
+                self.send_json({'ok': False, 'error': str(e)}, 502)
 
 class ReusableTCPServer(socketserver.TCPServer):
     allow_reuse_address = True
