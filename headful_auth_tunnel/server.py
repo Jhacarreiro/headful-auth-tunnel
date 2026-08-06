@@ -25,6 +25,8 @@ TOKEN = os.environ.get('TOKEN') or secrets.token_hex(16)
 TLS_CERT = os.environ.get('TLS_CERT')
 TLS_KEY = os.environ.get('TLS_KEY')
 BASE_URL = os.environ.get('BASE_URL', 'https://example.com/')
+LOCALE = os.environ.get('LOCALE', 'en-US')
+TIMEZONE_ID = os.environ.get('TIMEZONE_ID')
 
 OUT.mkdir(parents=True, exist_ok=True)
 Path(PROFILE).mkdir(parents=True, exist_ok=True)
@@ -279,8 +281,8 @@ class BrowserState:
             self.session = StealthySession(
                 headless=False,
                 user_data_dir=PROFILE,
-                locale='pt-PT',
-                timezone_id='Europe/Lisbon',
+                locale=LOCALE,
+                timezone_id=TIMEZONE_ID,
                 timeout=30000,
                 solve_cloudflare=False,
                 allow_webgl=True,
