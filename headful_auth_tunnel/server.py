@@ -25,6 +25,23 @@ TOKEN = os.environ.get('TOKEN') or secrets.token_hex(16)
 TLS_CERT = os.environ.get('TLS_CERT')
 TLS_KEY = os.environ.get('TLS_KEY')
 BASE_URL = os.environ.get('BASE_URL', 'https://example.com/')
+VIEWPORT_W = int(os.environ.get('SCREEN_WIDTH', '1440'))
+VIEWPORT_H = int(os.environ.get('SCREEN_HEIGHT', '1100'))
+
+if bool(TLS_CERT) != bool(TLS_KEY):
+    raise SystemExit('TLS_CERT and TLS_KEY must be set together (or both unset).')
+
+# TOKEN_FILE mirrors what scripts/start.sh persists; when TOKEN is not set,
+# prefer the persisted token so direct `python3 -m headful_auth_tunnel.server`
+# runs keep the same token across restarts (and the browser cookie stays valid).
+_TOKEN_FILE = os.environ.get('TOKEN_FILE')
+if _TOKEN_FILE and not os.environ.get('TOKEN'):
+    try:
+        persisted = Path(_TOKEN_FILE).read_text(encoding='utf-8').strip().splitlines()[0].strip()
+        if persisted:
+            TOKEN = persisted
+    except (OSError, IndexError):
+        pass
 
 OUT.mkdir(parents=True, exist_ok=True)
 Path(PROFILE).mkdir(parents=True, exist_ok=True)
@@ -106,8 +123,8 @@ async function refresh() {
 function eventCoords(e) {
   const rect = screen.getBoundingClientRect();
   // Browser mouse expects CSS viewport coordinates, not DPR-scaled screenshot pixels.
-  const naturalW = 1440;
-  const naturalH = 1100;
+  const naturalW = VIEWPORT_W_PLACEHOLDER;
+  const naturalH = VIEWPORT_H_PLACEHOLDER;
   const p = e.touches && e.touches[0] ? e.touches[0] : (e.changedTouches && e.changedTouches[0] ? e.changedTouches[0] : e);
   const x = Math.max(0, Math.min(naturalW - 1, Math.round((p.clientX - rect.left) * naturalW / rect.width)));
   const y = Math.max(0, Math.min(naturalH - 1, Math.round((p.clientY - rect.top) * naturalH / rect.height)));
@@ -292,7 +309,7 @@ class BrowserState:
             )
             self.session.start()
             self.page = self.session.context.new_page()
-            self.page.set_viewport_size({'width': 1440, 'height': 1100})
+            self.page.set_viewport_size({'width': VIEWPORT_W, 'height': VIEWPORT_H})
             self.page.goto(BASE_URL, wait_until='domcontentloaded', timeout=30000)
             self.started_at = time.time()
 
@@ -346,9 +363,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_json({'ok': True, 'engine': 'scrapling-stealthy', 'profile': PROFILE, 'started': state.started_at})
             return
         if parsed.path == '/':
-            self.send_response(200 if authorized(self) else 403)
-            if authorized(self):
-                body = HTML.replace('BASE_URL_PLACEHOLDER', BASE_URL).encode('utf-8')
+            allowed = authorized(self)
+            self.send_response(200 if allowed else 403)
+            if allowed:
+                body = (
+                    HTML
+                    .replace('BASE_URL_PLACEHOLDER', BASE_URL)
+                    .replace('VIEWPORT_W_PLACEHOLDER', str(VIEWPORT_W))
+                    .replace('VIEWPORT_H_PLACEHOLDER', str(VIEWPORT_H))
+                    .encode('utf-8')
+                )
                 self.send_header('Content-Type', 'text/html; charset=utf-8')
                 self.send_header('Set-Cookie', f'cgpt_auth_token={TOKEN}; Path=/; HttpOnly; SameSite=Lax')
                 self.send_header('Content-Length', str(len(body)))
@@ -386,15 +410,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             state.start()
             page = state.page
             if parsed.path == '/click':
-                x = max(0, min(1439, int(payload.get('x', 0))))
-                y = max(0, min(1099, int(payload.get('y', 0))))
+                x = max(0, min(VIEWPORT_W - 1, int(payload.get('x', 0))))
+                y = max(0, min(VIEWPORT_H - 1, int(payload.get('y', 0))))
                 print(f'CLICK x={x} y={y}', flush=True)
                 page.mouse.click(x, y)
                 self.send_json({'ok': True, 'x': x, 'y': y})
             elif parsed.path == '/mouse':
                 action = str(payload.get('action', 'move')).lower()
-                x = max(0, min(1439, int(payload.get('x', 0))))
-                y = max(0, min(1099, int(payload.get('y', 0))))
+                x = max(0, min(VIEWPORT_W - 1, int(payload.get('x', 0))))
+                y = max(0, min(VIEWPORT_H - 1, int(payload.get('y', 0))))
                 print(f'MOUSE action={action} x={x} y={y}', flush=True)
                 if action == 'down':
                     page.mouse.move(x, y)
@@ -408,10 +432,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     self.send_response(400); self.end_headers(); self.wfile.write(b'unknown mouse action'); return
                 self.send_json({'ok': True, 'action': action, 'x': x, 'y': y})
             elif parsed.path == '/drag':
-                x1 = max(0, min(1439, int(payload.get('x1', 0))))
-                y1 = max(0, min(1099, int(payload.get('y1', 0))))
-                x2 = max(0, min(1439, int(payload.get('x2', x1))))
-                y2 = max(0, min(1099, int(payload.get('y2', y1))))
+                x1 = max(0, min(VIEWPORT_W - 1, int(payload.get('x1', 0))))
+                y1 = max(0, min(VIEWPORT_H - 1, int(payload.get('y1', 0))))
+                x2 = max(0, min(VIEWPORT_W - 1, int(payload.get('x2', x1))))
+                y2 = max(0, min(VIEWPORT_H - 1, int(payload.get('y2', y1))))
                 steps = max(2, min(80, int(payload.get('steps', 32))))
                 duration_ms = max(50, min(3000, int(payload.get('durationMs', 700))))
                 print(f'DRAG x1={x1} y1={y1} x2={x2} y2={y2} steps={steps} durationMs={duration_ms}', flush=True)
