@@ -25,6 +25,8 @@ TOKEN = os.environ.get('TOKEN') or secrets.token_hex(16)
 TLS_CERT = os.environ.get('TLS_CERT')
 TLS_KEY = os.environ.get('TLS_KEY')
 BASE_URL = os.environ.get('BASE_URL', 'https://example.com/')
+MAX_TYPE_CHARS = int(os.environ.get('MAX_TYPE_CHARS', '8192'))
+MAX_URL_CHARS = int(os.environ.get('MAX_URL_CHARS', '2048'))
 
 OUT.mkdir(parents=True, exist_ok=True)
 Path(PROFILE).mkdir(parents=True, exist_ok=True)
@@ -305,6 +307,14 @@ class BrowserState:
 
 state = BrowserState()
 
+def auth_cookie_header() -> str:
+    # Add Secure when TLS is enabled so the session cookie is never sent cleartext.
+    flags = 'Path=/; HttpOnly; SameSite=Lax'
+    if TLS_CERT and TLS_KEY:
+        flags += '; Secure'
+    return f'cgpt_auth_token={TOKEN}; {flags}'
+
+
 def authorized(handler: http.server.BaseHTTPRequestHandler) -> bool:
     parsed = urlparse(handler.path)
     qs = parse_qs(parsed.query)
@@ -333,7 +343,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def require_auth(self):
         if authorized(self):
-            self.send_header('Set-Cookie', f'cgpt_auth_token={TOKEN}; Path=/; HttpOnly; SameSite=Lax')
+            self.send_header('Set-Cookie', auth_cookie_header())
             return True
         self.send_response(HTTPStatus.FORBIDDEN)
         self.end_headers()
@@ -343,14 +353,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path == '/health':
-            self.send_json({'ok': True, 'engine': 'scrapling-stealthy', 'profile': PROFILE, 'started': state.started_at})
+            # Unauthenticated liveness only — do not leak host filesystem paths.
+            payload = {'ok': True, 'engine': 'scrapling-stealthy', 'started': state.started_at}
+            if authorized(self):
+                payload['profile'] = PROFILE
+            self.send_json(payload)
             return
         if parsed.path == '/':
             self.send_response(200 if authorized(self) else 403)
             if authorized(self):
                 body = HTML.replace('BASE_URL_PLACEHOLDER', BASE_URL).encode('utf-8')
                 self.send_header('Content-Type', 'text/html; charset=utf-8')
-                self.send_header('Set-Cookie', f'cgpt_auth_token={TOKEN}; Path=/; HttpOnly; SameSite=Lax')
+                self.send_header('Set-Cookie', auth_cookie_header())
                 self.send_header('Content-Length', str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
@@ -426,6 +440,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_json({'ok': True, 'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2, 'steps': steps, 'durationMs': duration_ms})
             elif parsed.path == '/type':
                 text = str(payload.get('text', ''))
+                if len(text) > MAX_TYPE_CHARS:
+                    self.send_json({'ok': False, 'error': f'text exceeds MAX_TYPE_CHARS ({MAX_TYPE_CHARS})'}, status=400)
+                    return
                 print(f'TYPE chars={len(text)}', flush=True)
                 page.keyboard.type(text)
                 self.send_json({'ok': True, 'chars': len(text)})
@@ -435,9 +452,29 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 page.keyboard.press(key)
                 self.send_json({'ok': True, 'key': key})
             elif parsed.path == '/goto':
-                url = str(payload.get('url', BASE_URL))
-                if not url.startswith('http'):
+                url = str(payload.get('url', BASE_URL)).strip()
+                if not url:
+                    self.send_json({'ok': False, 'error': 'url is required'}, status=400)
+                    return
+                if len(url) > MAX_URL_CHARS:
+                    self.send_json({'ok': False, 'error': f'url exceeds MAX_URL_CHARS ({MAX_URL_CHARS})'}, status=400)
+                    return
+                if '://' in url:
+                    scheme = url.split('://', 1)[0].lower()
+                    if scheme not in ('http', 'https'):
+                        self.send_json({'ok': False, 'error': 'url must use http or https'}, status=400)
+                        return
+                elif not url.startswith(('http://', 'https://')):
                     url = 'https://' + url
+                try:
+                    parsed_url = urlparse(url)
+                except Exception:
+                    self.send_json({'ok': False, 'error': 'invalid url'}, status=400)
+                    return
+                host = (parsed_url.hostname or '').strip()
+                if parsed_url.scheme not in ('http', 'https') or not host:
+                    self.send_json({'ok': False, 'error': 'url must be http(s) with a host'}, status=400)
+                    return
                 page.goto(url, wait_until='domcontentloaded', timeout=30000)
                 self.send_json({'ok': True, 'url': page.url})
             elif parsed.path == '/back':
