@@ -27,6 +27,7 @@ TLS_KEY = os.environ.get('TLS_KEY')
 BASE_URL = os.environ.get('BASE_URL', 'https://example.com/')
 MAX_TYPE_CHARS = int(os.environ.get('MAX_TYPE_CHARS', '8192'))
 MAX_URL_CHARS = int(os.environ.get('MAX_URL_CHARS', '2048'))
+MAX_KEY_CHARS = int(os.environ.get('MAX_KEY_CHARS', '64'))
 
 OUT.mkdir(parents=True, exist_ok=True)
 Path(PROFILE).mkdir(parents=True, exist_ok=True)
@@ -448,6 +449,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_json({'ok': True, 'chars': len(text)})
             elif parsed.path == '/key':
                 key = str(payload.get('key', 'Enter'))
+                if not key or len(key) > MAX_KEY_CHARS:
+                    self.send_json({'ok': False, 'error': f'key must be 1..{MAX_KEY_CHARS} chars'}, status=400)
+                    return
                 print(f'KEY key={key}', flush=True)
                 page.keyboard.press(key)
                 self.send_json({'ok': True, 'key': key})
