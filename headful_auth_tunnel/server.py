@@ -25,6 +25,8 @@ TOKEN = os.environ.get('TOKEN') or secrets.token_hex(16)
 TLS_CERT = os.environ.get('TLS_CERT')
 TLS_KEY = os.environ.get('TLS_KEY')
 BASE_URL = os.environ.get('BASE_URL', 'https://example.com/')
+# Cap authenticated POST bodies before reading into memory (DoS guard).
+MAX_REQUEST_BYTES = int(os.environ.get('MAX_REQUEST_BYTES', str(1_048_576)))
 
 OUT.mkdir(parents=True, exist_ok=True)
 Path(PROFILE).mkdir(parents=True, exist_ok=True)
@@ -376,7 +378,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if not authorized(self):
             self.send_response(403); self.end_headers(); self.wfile.write(b'Forbidden'); return
-        length = int(self.headers.get('Content-Length') or '0')
+        try:
+            length = int(self.headers.get('Content-Length') or '0')
+        except (TypeError, ValueError):
+            self.send_json({'ok': False, 'error': 'invalid Content-Length'}, status=400)
+            return
+        if length < 0 or length > MAX_REQUEST_BYTES:
+            self.send_json({'ok': False, 'error': 'payload too large'}, status=413)
+            return
         body = self.rfile.read(length) if length else b'{}'
         try:
             payload = json.loads(body.decode('utf-8') or '{}')
