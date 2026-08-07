@@ -11,13 +11,19 @@ DISPLAY=${DISPLAY:-:99}
 SCREEN_WIDTH=${SCREEN_WIDTH:-1440}
 SCREEN_HEIGHT=${SCREEN_HEIGHT:-1100}
 export DISPLAY SCREEN_WIDTH SCREEN_HEIGHT
+RUNTIME_DIR=${RUNTIME_DIR:-$ROOT_DIR/runtime}
+XVFB_PID_FILE=${XVFB_PID_FILE:-$RUNTIME_DIR/xvfb.pid}
+PID_FILE=${PID_FILE:-$RUNTIME_DIR/tunnel.pid}
+mkdir -p "$RUNTIME_DIR"
 
 Xvfb "$DISPLAY" -screen 0 "${SCREEN_WIDTH}x${SCREEN_HEIGHT}x24" -nolisten tcp -ac &
 xvfb_pid=$!
+printf '%s\n' "$xvfb_pid" > "$XVFB_PID_FILE"
 app_pid=
 cleanup() {
   [ -z "$app_pid" ] || kill "$app_pid" 2>/dev/null || true
   kill "$xvfb_pid" 2>/dev/null || true
+  rm -f "$PID_FILE" "$XVFB_PID_FILE"
 }
 trap cleanup EXIT INT TERM
 sleep 1
@@ -30,4 +36,5 @@ else
   python3 -m headful_auth_tunnel.server &
 fi
 app_pid=$!
+printf '%s\n' "$app_pid" > "$PID_FILE"
 wait "$app_pid"

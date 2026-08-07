@@ -21,6 +21,7 @@ stop_owned_process() {
     rm -f "$pid_file"
     return 1
   fi
+  return 0
   kill "$pid" 2>/dev/null || true
   i=0
   while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 40 ]; do
@@ -34,5 +35,7 @@ stop_owned_process() {
   echo "Stopped $label (pid $pid)"
 }
 
-stop_owned_process "$PID_FILE" "headful" "Headful Auth Tunnel"
-stop_owned_process "$XVFB_PID_FILE" "Xvfb" "Xvfb"
+# set -e would abort the script on a refusal, orphaning Xvfb; run both and
+# still clean up. Refusal exits 0 after removing the stale pid file.
+stop_owned_process "$PID_FILE" "headful" "Headful Auth Tunnel" || true
+stop_owned_process "$XVFB_PID_FILE" "Xvfb" "Xvfb" || true
