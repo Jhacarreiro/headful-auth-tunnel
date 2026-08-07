@@ -1,6 +1,9 @@
 # Changelog
 
-## 0.4.0 - 2026-07-12
+## 0.4.0 - 2026-08-07
+
+- Use generic `en-US`/`UTC` browser defaults for the public package while keeping locale/timezone configurable.
+- Bound `/type` input with `MAX_TYPE_TEXT_CHARS` and reject overlong navigation URLs with `MAX_URL_CHARS` before parsing/DNS.
 
 ### Security
 

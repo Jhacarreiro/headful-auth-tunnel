@@ -83,6 +83,8 @@ class Config:
     timezone_id: str
     screenshot_interval_ms: int
     max_request_bytes: int
+    max_type_text_chars: int
+    max_url_chars: int
     socket_timeout_seconds: int
     navigation_timeout_ms: int
     auth_token: str
@@ -136,10 +138,12 @@ class Config:
             profile_dir=profile_dir,
             screen_width=_env_int("SCREEN_WIDTH", 1440, 320, 7680),
             screen_height=_env_int("SCREEN_HEIGHT", 1100, 240, 4320),
-            locale=os.getenv("LOCALE", "pt-PT").strip() or "pt-PT",
-            timezone_id=os.getenv("TIMEZONE_ID", "Europe/Lisbon").strip() or "Europe/Lisbon",
+            locale=os.getenv("LOCALE", "en-US").strip() or "en-US",
+            timezone_id=os.getenv("TIMEZONE_ID", "UTC").strip() or "UTC",
             screenshot_interval_ms=_env_int("SCREENSHOT_INTERVAL_MS", 2000, 250, 60000),
             max_request_bytes=_env_int("MAX_REQUEST_BYTES", 1_048_576, 1024, 16_777_216),
+            max_type_text_chars=_env_int("MAX_TYPE_TEXT_CHARS", 16_384, 1, 1_048_576),
+            max_url_chars=_env_int("MAX_URL_CHARS", 8_192, 256, 65_536),
             socket_timeout_seconds=_env_int("SOCKET_TIMEOUT_SECONDS", 15, 1, 300),
             navigation_timeout_ms=_env_int("NAVIGATION_TIMEOUT_MS", 30000, 1000, 300000),
             auth_token=token,

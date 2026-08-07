@@ -34,8 +34,10 @@ def test_defaults_are_original_values(monkeypatch, tmp_path):
     config = Config.from_env()
 
     assert (config.screen_width, config.screen_height) == (1440, 1100)
-    assert config.locale == "pt-PT"
-    assert config.timezone_id == "Europe/Lisbon"
+    assert config.locale == "en-US"
+    assert config.timezone_id == "UTC"
+    assert config.max_type_text_chars == 16384
+    assert config.max_url_chars == 8192
     assert config.allow_private_network_navigation is False
     assert config.allow_query_token is False
     assert token_file.read_text().strip() == config.auth_token

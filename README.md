@@ -13,7 +13,7 @@ It is useful when automation runs on a headless machine, but a person must occas
 - No token in URLs, browser history, JavaScript storage or routine access logs.
 - Live PNG screenshots with click/drag coordinates based on the actual image dimensions.
 - Editable viewport from `320×240` to `7680×4320`; the `1440×1100` default is preserved.
-- Editable locale and timezone; `pt-PT` and `Europe/Lisbon` remain the defaults.
+- Editable locale and timezone with generic `en-US` and `UTC` defaults.
 - Navigation, back, forward, reload, typing and key presses.
 - Tab/popup discovery, focus and close controls.
 - DOM inspection plus selector click, fill, press and select.
@@ -77,8 +77,8 @@ BIND_HOST=127.0.0.1
 PORT=19192
 SCREEN_WIDTH=1440
 SCREEN_HEIGHT=1100
-LOCALE=pt-PT
-TIMEZONE_ID=Europe/Lisbon
+LOCALE=en-US
+TIMEZONE_ID=UTC
 ALLOW_PRIVATE_NETWORK_NAVIGATION=false
 ```
 
@@ -209,8 +209,8 @@ Sensitive values are omitted unless `include_sensitive_values` is explicitly ena
 | `AUTH_TOKEN` | unset | Inline token override, minimum 24 characters. Prefer `TOKEN_FILE`. |
 | `SCREEN_WIDTH` | `1440` | Startup viewport width, 320–7680. |
 | `SCREEN_HEIGHT` | `1100` | Startup viewport height, 240–4320. |
-| `LOCALE` | `pt-PT` | Browser locale. |
-| `TIMEZONE_ID` | `Europe/Lisbon` | Browser timezone ID. |
+| `LOCALE` | `en-US` | Browser locale. |
+| `TIMEZONE_ID` | `UTC` | Browser timezone ID. |
 | `SCREENSHOT_INTERVAL_MS` | `2000` | UI refresh interval, 250–60000 ms. |
 | `NAVIGATION_TIMEOUT_MS` | `30000` | Browser navigation timeout. |
 | `ALLOW_PRIVATE_NETWORK_NAVIGATION` | `false` | Permit every private/internal destination. |
@@ -219,6 +219,8 @@ Sensitive values are omitted unless `include_sensitive_values` is explicitly ena
 | `ALLOW_QUERY_TOKEN` | `false` | Enable legacy `?token=` bootstrap. |
 | `SESSION_COOKIE_NAME` | `headful_auth_session` | Session cookie name. |
 | `MAX_REQUEST_BYTES` | `1048576` | Maximum request body. |
+| `MAX_TYPE_TEXT_CHARS` | `16384` | Maximum text accepted by `/type`. |
+| `MAX_URL_CHARS` | `8192` | Maximum navigation URL length before parsing or DNS resolution. |
 | `SOCKET_TIMEOUT_SECONDS` | `15` | Per-client socket timeout. |
 | `EXPOSE_HEALTH_DETAILS` | `false` | Include browser/tab counts in `/health`. |
 | `MAX_DOM_TEXT_CHARS` | `20000` | Maximum page text returned by DOM snapshot. |

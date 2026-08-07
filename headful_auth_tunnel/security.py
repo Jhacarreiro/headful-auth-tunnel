@@ -49,6 +49,8 @@ def validate_navigation_url(url: str, config: Config) -> NavigationDecision:
     candidate = url.strip()
     if not candidate:
         return NavigationDecision(False, "URL is required")
+    if len(candidate) > config.max_url_chars:
+        return NavigationDecision(False, "URL is too long")
 
     parsed = urlsplit(candidate)
     if parsed.scheme.lower() not in {"http", "https"}:

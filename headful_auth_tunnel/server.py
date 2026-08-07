@@ -279,7 +279,7 @@ class BrowserSession:
         return {"ok": True}
 
     def type_text(self, text: str) -> dict[str, bool]:
-        if len(text) > 100000:
+        if len(text) > self.config.max_type_text_chars:
             raise RequestError(400, "Text is too long")
         self._current_page().keyboard.type(text)
         return {"ok": True}

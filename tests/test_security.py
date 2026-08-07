@@ -73,3 +73,13 @@ def test_route_policy_only_allows_safe_non_network_schemes(make_config):
 def test_invalid_port_is_rejected(make_config):
     decision = validate_navigation_url("https://example.com:99999", make_config())
     assert decision.allowed is False
+
+
+def test_overlong_url_is_rejected_before_resolution(monkeypatch, make_config):
+    monkeypatch.setattr(
+        socket, "getaddrinfo", lambda *args, **kwargs: pytest.fail("DNS should not run")
+    )
+    config = make_config(max_url_chars=64)
+    decision = validate_navigation_url("https://example.com/" + "a" * 80, config)
+    assert decision.allowed is False
+    assert decision.reason == "URL is too long"
