@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 import re
 import secrets
 from contextlib import suppress
@@ -65,8 +66,25 @@ def load_or_create_token() -> tuple[str, Path | None]:
             token_file.chmod(0o600)
         return token, token_file
 
+    # Exclusive-create: two concurrent first starts would each mint their
+    # own token and last-writer-wins the file - the loser of the port-bind
+    # race exits after writing, and the surviving server authenticates the
+    # OTHER token (users reading the file get 401). On EEXIST, adopt the
+    # winner's token instead of overwriting.
     token = secrets.token_urlsafe(32)
-    token_file.write_text(token + "\n", encoding="utf-8")
+    try:
+        with token_file.open("x", encoding="utf-8") as fh:
+            fh.write(token + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+    except FileExistsError:
+        # The winner may not have flushed yet when we lose the race: retry
+        # the read until the file holds a token (bounded).
+        for _ in range(100):
+            token = token_file.read_text(encoding="utf-8").strip()
+            if token:
+                break
+            time.sleep(0.005)
     token_file.chmod(0o600)
     return token, token_file
 
