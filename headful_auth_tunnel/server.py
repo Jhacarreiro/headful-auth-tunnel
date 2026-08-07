@@ -1,479 +1,846 @@
-#!/usr/bin/env python3
 from __future__ import annotations
 
-import base64
-import http.server
 import json
-import os
+import logging
+import queue
 import secrets
-import socketserver
 import ssl
 import threading
 import time
-from http import HTTPStatus
-from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from concurrent.futures import Future
+from dataclasses import dataclass
+from hmac import compare_digest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 from scrapling.fetchers import StealthySession
 
-ROOT = Path(os.environ.get('OUT_DIR', '.')).expanduser().resolve()
-OUT = ROOT / 'out'
-PROFILE = os.environ.get('PROFILE_DIR', './profile')
-HOST = os.environ.get('BIND_HOST', '127.0.0.1')
-PORT = int(os.environ.get('PORT', '19192'))
-TOKEN = os.environ.get('TOKEN') or secrets.token_hex(16)
-TLS_CERT = os.environ.get('TLS_CERT')
-TLS_KEY = os.environ.get('TLS_KEY')
-BASE_URL = os.environ.get('BASE_URL', 'https://example.com/')
+from .config import Config
+from .security import NavigationPolicy, bearer_token, token_from_cookie
+from .ui import APP_CSS, APP_HTML, APP_JS, LOGIN_HTML
 
-OUT.mkdir(parents=True, exist_ok=True)
-Path(PROFILE).mkdir(parents=True, exist_ok=True)
+LOGGER = logging.getLogger("headful_auth_tunnel")
 
-HTML = r'''<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="referrer" content="no-referrer">
-  <title>Headful Browser Tunnel</title>
-  <style>
-    body { font-family: sans-serif; background:#111; color:white; margin:0; display:flex; flex-direction:column; align-items:center; }
-    #bar { width:100%; box-sizing:border-box; padding:8px; display:flex; flex-wrap:wrap; gap:6px; background:#222; position:sticky; top:0; z-index:2; }
-    input, button { padding:10px; font-size:15px; border-radius:5px; border:0; }
-    button { background:#D4FF00; color:#000; font-weight:700; }
-    button.secondary { background:#666; color:#fff; }
-    button.done { background:#ff4444; color:#fff; }
-    #urlInput { flex: 1 1 260px; }
-    #typeInput { flex: 1 1 260px; min-height: 42px; }
-    #wrap { width:96vw; margin:8px; border:2px solid #444; overflow:auto; background:#000; }
-    #screen { display:block; width:100%; height:auto; cursor:crosshair; touch-action:none; }
-    #status { width:100%; box-sizing:border-box; padding:8px 10px; font-size:12px; color:#D4FF00; }
-    .hidden { display:none; }
-    .primary { background:#D4FF00; color:#000; }
-    .assist { background:#00d4ff; color:#000; }
-  </style>
-</head>
-<body>
-  <div id="bar">
-    <input id="urlInput" value="BASE_URL_PLACEHOLDER">
-    <button class="primary" onclick="gotoUrl()">GO</button>
-    <button class="secondary" onclick="goBack()">BACK</button>
-    <textarea id="typeInput" placeholder="paste/type here; SEND writes to browser" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false"></textarea>
-    <button class="secondary" onclick="sendTextBox()">SEND</button>
-    <button class="secondary" onclick="pastePrompt()">PASTE</button>
-    <button class="secondary" onclick="clearField()">CLEAR</button>
-    <button id="dragAssistBtn" class="assist" onclick="setCoordMode()">DRAG ASSIST</button>
-    <button id="runDragBtn" class="assist hidden" onclick="runCoordDrag()">RUN DRAG</button>
-    <button id="cancelDragBtn" class="secondary hidden" onclick="clearCoordDrag()">CANCEL</button>
-    <button class="done" onclick="done()">DONE</button>
-  </div>
-  <div id="wrap"><img id="screen" alt="remote browser screenshot"></div>
-  <div id="status">starting...</div>
-<script>
-const statusEl = document.getElementById('status');
-const screen = document.getElementById('screen');
-const typeInput = document.getElementById('typeInput');
-const dragAssistBtn = document.getElementById('dragAssistBtn');
-const runDragBtn = document.getElementById('runDragBtn');
-const cancelDragBtn = document.getElementById('cancelDragBtn');
-let lastObjectUrl = null;
-let busy = false;
-let token = new URLSearchParams(location.search).get('token') || localStorage.getItem('cgpt_token') || '';
-if (token) localStorage.setItem('cgpt_token', token);
-function qs() { return token ? ('?token=' + encodeURIComponent(token)) : ''; }
-async function api(path, body) {
-  busy = true;
-  try {
-    const r = await fetch(path + qs(), { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body || {}) });
-    if (!r.ok) throw new Error(await r.text());
-    return await r.json();
-  } finally {
-    setTimeout(() => { busy = false; }, 250);
-  }
-}
-async function refresh() {
-  if (busy) return;
-  try {
-    const r = await fetch('/screenshot' + qs() + '&t=' + Date.now(), {cache:'no-store'});
-    if (!r.ok) { statusEl.textContent = 'screenshot error: ' + r.status + ' ' + await r.text(); return; }
-    const blob = await r.blob();
-    const url = URL.createObjectURL(blob);
-    screen.onload = () => { if (lastObjectUrl) URL.revokeObjectURL(lastObjectUrl); lastObjectUrl = url; };
-    screen.src = url;
-    statusEl.textContent = 'stream ' + new Date().toLocaleTimeString();
-  } catch (e) { statusEl.textContent = 'stream error: ' + e.message; }
-}
-function eventCoords(e) {
-  const rect = screen.getBoundingClientRect();
-  // Browser mouse expects CSS viewport coordinates, not DPR-scaled screenshot pixels.
-  const naturalW = 1440;
-  const naturalH = 1100;
-  const p = e.touches && e.touches[0] ? e.touches[0] : (e.changedTouches && e.changedTouches[0] ? e.changedTouches[0] : e);
-  const x = Math.max(0, Math.min(naturalW - 1, Math.round((p.clientX - rect.left) * naturalW / rect.width)));
-  const y = Math.max(0, Math.min(naturalH - 1, Math.round((p.clientY - rect.top) * naturalH / rect.height)));
-  return {x, y};
-}
-let dragging = false;
-let lastMoveSent = 0;
-let refreshTimer = null;
-let coordMode = false;
-let coordStart = null;
-let coordEnd = null;
-let mouseQueue = Promise.resolve();
-function setRefresh(ms) {
-  if (refreshTimer) clearInterval(refreshTimer);
-  refreshTimer = setInterval(refresh, ms);
-}
-function mouseApi(action, x, y) {
-  mouseQueue = mouseQueue.then(async () => {
-    const r = await fetch('/mouse' + qs(), { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({action, x, y}) });
-    if (!r.ok) throw new Error(await r.text());
-    return await r.json();
-  }).catch(err => { statusEl.textContent = 'mouse error: ' + err.message; });
-  return mouseQueue;
-}
-function pointerDown(e) {
-  e.preventDefault();
-  const {x, y} = eventCoords(e);
-  if (coordMode) {
-    if (!coordStart) {
-      coordStart = {x, y};
-      statusEl.textContent = `coord drag start ${x}, ${y}; click end point then RUN COORD DRAG`;
-    } else {
-      coordEnd = {x, y};
-      statusEl.textContent = `coord drag end ${x}, ${y}; press RUN COORD DRAG`;
-    }
-    return;
-  }
-  dragging = true;
-  lastMoveSent = 0;
-  if (e.pointerId !== undefined && screen.setPointerCapture) screen.setPointerCapture(e.pointerId);
-  setRefresh(250);
-  statusEl.textContent = `mouse down ${x}, ${y}`;
-  mouseApi('down', x, y);
-}
-function pointerMove(e) {
-  if (!dragging) return;
-  e.preventDefault();
-  const now = Date.now();
-  if (now - lastMoveSent < 35) return;
-  lastMoveSent = now;
-  const {x, y} = eventCoords(e);
-  statusEl.textContent = `drag ${x}, ${y}`;
-  mouseApi('move', x, y);
-}
-function pointerUp(e) {
-  if (!dragging) return;
-  e.preventDefault();
-  const {x, y} = eventCoords(e);
-  dragging = false;
-  if (e.pointerId !== undefined && screen.releasePointerCapture) {
-    try { screen.releasePointerCapture(e.pointerId); } catch (_) {}
-  }
-  setRefresh(1600);
-  statusEl.textContent = `mouse up ${x}, ${y}`;
-  mouseApi('up', x, y).then(refresh);
-}
-function clickFallback(e) {
-  e.preventDefault();
-  const {x, y} = eventCoords(e);
-  statusEl.textContent = `click ${x}, ${y}`;
-  api('/click', {x, y}).catch(err => statusEl.textContent = 'click error: ' + err.message);
-}
-if (window.PointerEvent) {
-  screen.addEventListener('pointerdown', pointerDown);
-  screen.addEventListener('pointermove', pointerMove);
-  screen.addEventListener('pointerup', pointerUp);
-  screen.addEventListener('pointercancel', pointerUp);
-} else {
-  screen.addEventListener('touchstart', pointerDown, {passive:false});
-  screen.addEventListener('touchmove', pointerMove, {passive:false});
-  screen.addEventListener('touchend', pointerUp, {passive:false});
-  screen.addEventListener('mousedown', pointerDown);
-  screen.addEventListener('mousemove', pointerMove);
-  screen.addEventListener('mouseup', pointerUp);
-  screen.addEventListener('click', clickFallback);
-}
-function updateDragControls(active) {
-  dragAssistBtn.classList.toggle('hidden', active);
-  runDragBtn.classList.toggle('hidden', !active);
-  cancelDragBtn.classList.toggle('hidden', !active);
-}
-function setCoordMode() {
-  coordMode = true;
-  coordStart = null;
-  coordEnd = null;
-  dragging = false;
-  updateDragControls(true);
-  setRefresh(1600);
-  statusEl.textContent = 'drag assist: click START on the screenshot, click END, then RUN DRAG';
-}
-function clearCoordDrag() {
-  coordMode = false;
-  coordStart = null;
-  coordEnd = null;
-  updateDragControls(false);
-  statusEl.textContent = 'drag assist cancelled; normal mode';
-}
-async function runCoordDrag() {
-  if (!coordStart || !coordEnd) {
-    statusEl.textContent = 'coord drag needs start and end points first';
-    return;
-  }
-  const payload = {x1:coordStart.x, y1:coordStart.y, x2:coordEnd.x, y2:coordEnd.y, steps:32, durationMs:700};
-  if (!confirm(`Run drag from ${payload.x1},${payload.y1} to ${payload.x2},${payload.y2}?`)) return;
-  statusEl.textContent = `running coord drag ${payload.x1},${payload.y1} -> ${payload.x2},${payload.y2}`;
-  try {
-    const r = await api('/drag', payload);
-    statusEl.textContent = `coord drag done: ${r.x1},${r.y1} -> ${r.x2},${r.y2}`;
-    coordMode = false;
-    coordStart = null;
-    coordEnd = null;
-    updateDragControls(false);
-    await refresh();
-  } catch (err) { statusEl.textContent = 'coord drag error: ' + err.message; }
-}
-async function sendTextBox() {
-  const text = typeInput.value;
-  if (!text) { statusEl.textContent = 'local type box is empty'; return; }
-  statusEl.textContent = `sending ${text.length} chars from local box...`;
-  try {
-    const r = await api('/type', {text});
-    statusEl.textContent = `sent ${r.chars || text.length} chars exactly as shown in local box`;
-  } catch (err) { statusEl.textContent = 'send text error: ' + err.message; }
-}
-function clearLocalText() { typeInput.value = ''; statusEl.textContent = 'local type box cleared only'; }
-window.addEventListener('keydown', e => {
-  if (document.activeElement && ['INPUT','TEXTAREA'].includes(document.activeElement.tagName)) return;
-  if (e.key.length === 1) api('/type', {text:e.key}); else api('/key', {key:e.key});
-});
-function sendKey(key) { api('/key', {key}).catch(err => statusEl.textContent = err.message); }
-async function clearField() {
-  statusEl.textContent = 'clearing remote focused field...';
-  try {
-    await api('/key', {key:'Control+A'});
-    await api('/key', {key:'Backspace'});
-    statusEl.textContent = 'remote field cleared';
-  } catch (err) { statusEl.textContent = 'clear error: ' + err.message; }
-}
-function gotoUrl() { api('/goto', {url: document.getElementById('urlInput').value}).catch(err => statusEl.textContent = err.message); }
-function goBack() { api('/back', {}).then(r => statusEl.textContent = 'back: ' + (r.url || 'ok')).catch(err => statusEl.textContent = 'back error: ' + err.message); }
-function pastePrompt() { const text = prompt('Paste text'); if (text) api('/type', {text}).catch(err => statusEl.textContent = err.message); }
-async function done() { if (!confirm('Save session marker?')) return; const j = await api('/done', {}); alert(JSON.stringify(j)); }
-setRefresh(1600); refresh();
-</script>
-</body>
-</html>'''
 
-class BrowserState:
-    def __init__(self) -> None:
-        self.lock = threading.RLock()
+class RequestError(Exception):
+    def __init__(self, status: int, message: str):
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
+@dataclass
+class _Command:
+    method: str
+    kwargs: dict[str, Any]
+    future: Future
+
+
+class BrowserSession:
+    def __init__(self, config: Config):
+        self.config = config
+        self.policy = NavigationPolicy(config)
         self.session = None
+        self.context = None
         self.page = None
-        self.started_at = None
+        self.viewport = {"width": config.screen_width, "height": config.screen_height}
+        self.instance_id = secrets.token_hex(8)
+        self.started_at = time.time()
 
     def start(self) -> None:
-        with self.lock:
-            if self.session is not None and self.page is not None:
-                return
-            self.session = StealthySession(
-                headless=False,
-                user_data_dir=PROFILE,
-                locale='pt-PT',
-                timezone_id='Europe/Lisbon',
-                timeout=30000,
-                solve_cloudflare=False,
-                allow_webgl=True,
-                hide_canvas=False,
-                block_webrtc=True,
-                google_search=False,
-                network_idle=False,
-                load_dom=True,
-            )
-            self.session.start()
-            self.page = self.session.context.new_page()
-            self.page.set_viewport_size({'width': 1440, 'height': 1100})
-            self.page.goto(BASE_URL, wait_until='domcontentloaded', timeout=30000)
-            self.started_at = time.time()
+        decision = self.policy.validate(self.config.base_url, refresh=True)
+        if not decision.allowed:
+            raise RuntimeError(f"BASE_URL blocked: {decision.reason}")
+
+        self.session = StealthySession(
+            headless=False,
+            user_data_dir=str(self.config.profile_dir),
+            locale=self.config.locale,
+            timezone_id=self.config.timezone_id,
+            timeout=self.config.navigation_timeout_ms,
+            solve_cloudflare=False,
+            allow_webgl=True,
+            hide_canvas=False,
+            block_webrtc=True,
+            google_search=False,
+            network_idle=False,
+            load_dom=False,
+            max_pages=20,
+            additional_args={
+                "viewport": self.viewport.copy(),
+                "screen": self.viewport.copy(),
+                "device_scale_factor": 1,
+            },
+        )
+        self.session.start()
+        self.context = self.session.context
+        self.context.route("**/*", self._route_request)
+        self.context.route_web_socket("**/*", self._route_websocket)
+        self.context.on("page", self._on_page)
+
+        pages = [page for page in self.context.pages if not page.is_closed()]
+        self.page = pages[0] if pages else self.context.new_page()
+        self.page.set_viewport_size(self.viewport)
+        self.page.goto(
+            decision.normalized_url or self.config.base_url,
+            wait_until="domcontentloaded",
+            timeout=self.config.navigation_timeout_ms,
+        )
 
     def close(self) -> None:
-        with self.lock:
-            if self.session:
+        if self.session is not None:
+            try:
                 self.session.close()
-            self.session = None
-            self.page = None
+            except Exception:
+                LOGGER.exception("Failed to close browser session")
 
-state = BrowserState()
+    def _route_request(self, route, request) -> None:
+        decision = self.policy.validate(request.url, allow_non_network=True)
+        if decision.allowed:
+            route.continue_()
+        else:
+            LOGGER.warning("Blocked browser request to %s: %s", request.url, decision.reason)
+            route.abort("blockedbyclient")
 
-def authorized(handler: http.server.BaseHTTPRequestHandler) -> bool:
-    parsed = urlparse(handler.path)
-    qs = parse_qs(parsed.query)
-    supplied = (qs.get('token') or [''])[0]
-    cookie = handler.headers.get('Cookie') or ''
-    cookie_token = ''
-    for part in cookie.split(';'):
-        part = part.strip()
-        if part.startswith('cgpt_auth_token='):
-            cookie_token = part.split('=', 1)[1]
-    return supplied == TOKEN or cookie_token == TOKEN
+    def _route_websocket(self, websocket_route) -> None:
+        decision = self.policy.validate_websocket(websocket_route.url)
+        if decision.allowed:
+            websocket_route.connect_to_server()
+        else:
+            LOGGER.warning(
+                "Blocked browser WebSocket to %s: %s",
+                websocket_route.url,
+                decision.reason,
+            )
+            websocket_route.close(code=1008, reason="Destination blocked")
 
-class Handler(http.server.BaseHTTPRequestHandler):
-    server_version = 'cgpt-scrapling-auth/1.0'
-
-    def log_message(self, fmt: str, *args) -> None:
-        print('%s - %s' % (self.address_string(), fmt % args), flush=True)
-
-    def send_json(self, obj, status=200):
-        data = json.dumps(obj, ensure_ascii=False).encode('utf-8')
-        self.send_response(status)
-        self.send_header('Content-Type', 'application/json; charset=utf-8')
-        self.send_header('Content-Length', str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
-
-    def require_auth(self):
-        if authorized(self):
-            self.send_header('Set-Cookie', f'cgpt_auth_token={TOKEN}; Path=/; HttpOnly; SameSite=Lax')
-            return True
-        self.send_response(HTTPStatus.FORBIDDEN)
-        self.end_headers()
-        self.wfile.write(b'Forbidden')
-        return False
-
-    def do_GET(self):
-        parsed = urlparse(self.path)
-        if parsed.path == '/health':
-            self.send_json({'ok': True, 'engine': 'scrapling-stealthy', 'profile': PROFILE, 'started': state.started_at})
-            return
-        if parsed.path == '/':
-            self.send_response(200 if authorized(self) else 403)
-            if authorized(self):
-                body = HTML.replace('BASE_URL_PLACEHOLDER', BASE_URL).encode('utf-8')
-                self.send_header('Content-Type', 'text/html; charset=utf-8')
-                self.send_header('Set-Cookie', f'cgpt_auth_token={TOKEN}; Path=/; HttpOnly; SameSite=Lax')
-                self.send_header('Content-Length', str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-            else:
-                self.end_headers(); self.wfile.write(b'Forbidden')
-            return
-        if parsed.path == '/screenshot':
-            if not authorized(self):
-                self.send_response(403); self.end_headers(); self.wfile.write(b'Forbidden'); return
-            with state.lock:
-                state.start()
-                data = state.page.screenshot(type='jpeg', quality=58, full_page=False)
-            self.send_response(200)
-            self.send_header('Content-Type', 'image/jpeg')
-            self.send_header('Cache-Control', 'no-store')
-            self.send_header('Content-Length', str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
-            return
-        self.send_response(404); self.end_headers(); self.wfile.write(b'Not found')
-
-    def do_POST(self):
-        parsed = urlparse(self.path)
-        if not authorized(self):
-            self.send_response(403); self.end_headers(); self.wfile.write(b'Forbidden'); return
-        length = int(self.headers.get('Content-Length') or '0')
-        body = self.rfile.read(length) if length else b'{}'
+    def _on_page(self, page) -> None:
+        self.page = page
         try:
-            payload = json.loads(body.decode('utf-8') or '{}')
+            page.set_viewport_size(self.viewport)
+            page.bring_to_front()
         except Exception:
-            payload = {}
-        with state.lock:
-            state.start()
-            page = state.page
-            if parsed.path == '/click':
-                x = max(0, min(1439, int(payload.get('x', 0))))
-                y = max(0, min(1099, int(payload.get('y', 0))))
-                print(f'CLICK x={x} y={y}', flush=True)
-                page.mouse.click(x, y)
-                self.send_json({'ok': True, 'x': x, 'y': y})
-            elif parsed.path == '/mouse':
-                action = str(payload.get('action', 'move')).lower()
-                x = max(0, min(1439, int(payload.get('x', 0))))
-                y = max(0, min(1099, int(payload.get('y', 0))))
-                print(f'MOUSE action={action} x={x} y={y}', flush=True)
-                if action == 'down':
-                    page.mouse.move(x, y)
-                    page.mouse.down()
-                elif action == 'move':
-                    page.mouse.move(x, y)
-                elif action == 'up':
-                    page.mouse.move(x, y)
-                    page.mouse.up()
-                else:
-                    self.send_response(400); self.end_headers(); self.wfile.write(b'unknown mouse action'); return
-                self.send_json({'ok': True, 'action': action, 'x': x, 'y': y})
-            elif parsed.path == '/drag':
-                x1 = max(0, min(1439, int(payload.get('x1', 0))))
-                y1 = max(0, min(1099, int(payload.get('y1', 0))))
-                x2 = max(0, min(1439, int(payload.get('x2', x1))))
-                y2 = max(0, min(1099, int(payload.get('y2', y1))))
-                steps = max(2, min(80, int(payload.get('steps', 32))))
-                duration_ms = max(50, min(3000, int(payload.get('durationMs', 700))))
-                print(f'DRAG x1={x1} y1={y1} x2={x2} y2={y2} steps={steps} durationMs={duration_ms}', flush=True)
-                page.mouse.move(x1, y1)
-                page.mouse.down()
-                for i in range(1, steps + 1):
-                    x = round(x1 + (x2 - x1) * i / steps)
-                    y = round(y1 + (y2 - y1) * i / steps)
-                    page.mouse.move(x, y)
-                    time.sleep(duration_ms / steps / 1000.0)
-                page.mouse.up()
-                self.send_json({'ok': True, 'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2, 'steps': steps, 'durationMs': duration_ms})
-            elif parsed.path == '/type':
-                text = str(payload.get('text', ''))
-                print(f'TYPE chars={len(text)}', flush=True)
-                page.keyboard.type(text)
-                self.send_json({'ok': True, 'chars': len(text)})
-            elif parsed.path == '/key':
-                key = str(payload.get('key', 'Enter'))
-                print(f'KEY key={key}', flush=True)
-                page.keyboard.press(key)
-                self.send_json({'ok': True, 'key': key})
-            elif parsed.path == '/goto':
-                url = str(payload.get('url', BASE_URL))
-                if not url.startswith('http'):
-                    url = 'https://' + url
-                page.goto(url, wait_until='domcontentloaded', timeout=30000)
-                self.send_json({'ok': True, 'url': page.url})
-            elif parsed.path == '/back':
-                print('BACK', flush=True)
-                page.go_back(wait_until='domcontentloaded', timeout=15000)
-                self.send_json({'ok': True, 'url': page.url})
-            elif parsed.path == '/done':
-                cookies = state.session.context.cookies()
-                marker = {'savedAt': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), 'engine': 'scrapling-stealthy', 'profile': PROFILE, 'url': page.url, 'title': page.title(), 'cookieCount': len(cookies)}
-                (OUT / 'last-auth.json').write_text(json.dumps(marker, ensure_ascii=False, indent=2))
-                self.send_json({'ok': True, 'marker': marker})
-            else:
-                self.send_response(404); self.end_headers(); self.wfile.write(b'Not found')
+            LOGGER.exception("Failed to activate new page")
 
-class ReusableTCPServer(socketserver.TCPServer):
+    def _pages(self) -> list[Any]:
+        if self.context is None:
+            return []
+        return [page for page in self.context.pages if not page.is_closed()]
+
+    def _current_page(self):
+        pages = self._pages()
+        if not pages:
+            raise RuntimeError("No browser page is available")
+        if self.page not in pages:
+            self.page = pages[-1]
+        return self.page
+
+    def _find_page(self, page_id: str):
+        for page in self._pages():
+            if self._page_id(page) == page_id:
+                return page
+        raise RequestError(404, "Tab not found")
+
+    @staticmethod
+    def _page_id(page) -> str:
+        return format(id(page), "x")
+
+    def health(self) -> dict[str, Any]:
+        pages = self._pages()
+        return {"status": "ok", "browser": bool(pages), "tabs": len(pages)}
+
+    def meta(self) -> dict[str, Any]:
+        page = self._current_page()
+        try:
+            title = page.title()
+        except Exception:
+            title = ""
+        return {
+            "url": page.url,
+            "title": title,
+            "viewport": self.viewport.copy(),
+            "screenshot_interval_ms": self.config.screenshot_interval_ms,
+            "locale": self.config.locale,
+            "timezone_id": self.config.timezone_id,
+            "private_network_navigation": self.config.allow_private_network_navigation,
+            "browser_mode": "headful",
+            "persistent_profile": True,
+            "browser_instance_id": self.instance_id,
+            "browser_started_at": self.started_at,
+        }
+
+    def tabs(self) -> dict[str, Any]:
+        current = self._current_page()
+        items = []
+        for page in self._pages():
+            try:
+                title = page.title()
+            except Exception:
+                title = ""
+            items.append(
+                {
+                    "id": self._page_id(page),
+                    "title": title,
+                    "url": page.url,
+                    "active": page is current,
+                }
+            )
+        return {"tabs": items}
+
+    def focus_tab(self, id: str) -> dict[str, Any]:
+        page = self._find_page(id)
+        page.bring_to_front()
+        self.page = page
+        return self.meta()
+
+    def close_tab(self, id: str) -> dict[str, Any]:
+        pages = self._pages()
+        if len(pages) <= 1:
+            raise RequestError(409, "The last tab cannot be closed")
+        page = self._find_page(id)
+        page.close()
+        remaining = self._pages()
+        self.page = remaining[-1]
+        self.page.bring_to_front()
+        return self.tabs()
+
+    def screenshot(self) -> bytes:
+        return self._current_page().screenshot(type="png", full_page=False)
+
+    def navigate(self, url: str) -> dict[str, Any]:
+        decision = self.policy.validate(url, refresh=True)
+        if not decision.allowed:
+            raise RequestError(403, decision.reason)
+        page = self._current_page()
+        page.goto(
+            decision.normalized_url or url,
+            wait_until="domcontentloaded",
+            timeout=self.config.navigation_timeout_ms,
+        )
+        return self.meta()
+
+    def reload(self) -> dict[str, Any]:
+        self._current_page().reload(
+            wait_until="domcontentloaded", timeout=self.config.navigation_timeout_ms
+        )
+        return self.meta()
+
+    def history_back(self) -> dict[str, Any]:
+        self._current_page().go_back(
+            wait_until="domcontentloaded", timeout=self.config.navigation_timeout_ms
+        )
+        return self.meta()
+
+    def history_forward(self) -> dict[str, Any]:
+        self._current_page().go_forward(
+            wait_until="domcontentloaded", timeout=self.config.navigation_timeout_ms
+        )
+        return self.meta()
+
+    def set_viewport(self, width: int, height: int) -> dict[str, Any]:
+        if not 320 <= width <= 7680 or not 240 <= height <= 4320:
+            raise RequestError(400, "Viewport must be between 320×240 and 7680×4320")
+        self.viewport = {"width": width, "height": height}
+        for page in self._pages():
+            page.set_viewport_size(self.viewport)
+        return self.meta()
+
+    def _point(self, x: int, y: int) -> tuple[int, int]:
+        width, height = self.viewport["width"], self.viewport["height"]
+        if not 0 <= x < width or not 0 <= y < height:
+            raise RequestError(400, f"Point must be inside {width}×{height}")
+        return x, y
+
+    def click(self, x: int, y: int) -> dict[str, bool]:
+        x, y = self._point(x, y)
+        self._current_page().mouse.click(x, y)
+        return {"ok": True}
+
+    def drag(
+        self,
+        from_x: int,
+        from_y: int,
+        to_x: int,
+        to_y: int,
+        duration_ms: int = 500,
+    ) -> dict[str, bool]:
+        from_x, from_y = self._point(from_x, from_y)
+        to_x, to_y = self._point(to_x, to_y)
+        duration_ms = max(50, min(duration_ms, 5000))
+        steps = max(5, min(100, duration_ms // 20))
+        mouse = self._current_page().mouse
+        mouse.move(from_x, from_y)
+        mouse.down()
+        try:
+            mouse.move(to_x, to_y, steps=steps)
+        finally:
+            mouse.up()
+        return {"ok": True}
+
+    def type_text(self, text: str) -> dict[str, bool]:
+        if len(text) > self.config.max_type_text_chars:
+            raise RequestError(400, "Text is too long")
+        self._current_page().keyboard.type(text)
+        return {"ok": True}
+
+    def press_key(self, key: str) -> dict[str, bool]:
+        key = key.strip()
+        if not key or len(key) > 100:
+            raise RequestError(400, "Key must contain between 1 and 100 characters")
+        self._current_page().keyboard.press(key)
+        return {"ok": True}
+
+    def dom_fill(self, selector: str, value: str) -> dict[str, bool]:
+        selector = self._validate_selector(selector)
+        self._current_page().locator(selector).first.fill(value, timeout=10000)
+        return {"ok": True}
+
+    def dom_click(self, selector: str) -> dict[str, bool]:
+        selector = self._validate_selector(selector)
+        self._current_page().locator(selector).first.click(timeout=10000)
+        return {"ok": True}
+
+    def dom_press(self, selector: str, key: str) -> dict[str, bool]:
+        selector = self._validate_selector(selector)
+        if not key or len(key) > 100:
+            raise RequestError(400, "Invalid key")
+        self._current_page().locator(selector).first.press(key, timeout=10000)
+        return {"ok": True}
+
+    def dom_select(self, selector: str, value: str) -> dict[str, Any]:
+        selector = self._validate_selector(selector)
+        selected = (
+            self._current_page().locator(selector).first.select_option(value=value, timeout=10000)
+        )
+        return {"ok": True, "selected": selected}
+
+    @staticmethod
+    def _validate_selector(selector: str) -> str:
+        selector = selector.strip()
+        if not selector or len(selector) > 1000:
+            raise RequestError(400, "Selector must contain between 1 and 1000 characters")
+        return selector
+
+    def page_snapshot(
+        self,
+        include_values: bool = False,
+        include_sensitive_values: bool = False,
+    ) -> dict[str, Any]:
+        page = self._current_page()
+        return page.evaluate(
+            """({elementLimit, textLimit, includeValues, includeSensitiveValues}) => {
+              const sensitive = new RegExp(
+                'pass(word)?|secret|token|auth|otp|one.?time|cvv|cvc|credit.?card',
+                'i'
+              );
+              const bodyText = document.body ? (document.body.innerText || '') : '';
+              const nodes = Array.from(document.querySelectorAll(
+                'input, textarea, select, button, a, [contenteditable="true"]'
+              )).slice(0, elementLimit);
+              const elements = nodes.map((el) => {
+                const tag = el.tagName.toLowerCase();
+                const type = (el.getAttribute('type') || '').toLowerCase();
+                const identity = [el.id, el.getAttribute('name'), el.getAttribute('autocomplete')]
+                  .filter(Boolean).join(' ');
+                const isSensitive = (
+                  type === 'password' || type === 'hidden' || sensitive.test(identity)
+                );
+                const item = {
+                  tag,
+                  type,
+                  id: el.id || null,
+                  name: el.getAttribute('name'),
+                  role: el.getAttribute('role'),
+                  aria_label: el.getAttribute('aria-label'),
+                  placeholder: el.getAttribute('placeholder'),
+                  text: (el.innerText || el.textContent || '').trim().slice(0, 300),
+                  href: tag === 'a' ? el.href : null,
+                  disabled: Boolean(el.disabled),
+                  editable: (
+                    tag === 'input' || tag === 'textarea' ||
+                    tag === 'select' || el.isContentEditable
+                  ),
+                  sensitive: isSensitive
+                };
+                if (
+                  includeValues &&
+                  (!isSensitive || includeSensitiveValues) &&
+                  ['input', 'textarea', 'select'].includes(tag)
+                ) {
+                  item.value = String(el.value || '').slice(0, 2000);
+                }
+                return item;
+              });
+              return {
+                title: document.title,
+                url: location.href,
+                text: bodyText.slice(0, textLimit),
+                text_truncated: bodyText.length > textLimit,
+                elements
+              };
+            }""",
+            {
+                "elementLimit": self.config.max_dom_elements,
+                "textLimit": self.config.max_dom_text_chars,
+                "includeValues": bool(include_values),
+                "includeSensitiveValues": bool(include_sensitive_values),
+            },
+        )
+
+
+class BrowserController:
+    def __init__(self, config: Config):
+        self.config = config
+        self._queue: queue.Queue[_Command | None] = queue.Queue(maxsize=128)
+        self._ready = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="browser-worker", daemon=True)
+        self._startup_error: BaseException | None = None
+
+    def start(self) -> None:
+        self._thread.start()
+        if not self._ready.wait(timeout=90):
+            raise RuntimeError("Browser worker did not become ready")
+        if self._startup_error is not None:
+            raise RuntimeError("Browser worker failed to start") from self._startup_error
+
+    def _run(self) -> None:
+        session = BrowserSession(self.config)
+        try:
+            session.start()
+        except BaseException as exc:
+            self._startup_error = exc
+            self._ready.set()
+            return
+        self._ready.set()
+
+        while True:
+            command = self._queue.get()
+            if command is None:
+                break
+            try:
+                result = getattr(session, command.method)(**command.kwargs)
+            except BaseException as exc:
+                command.future.set_exception(exc)
+            else:
+                command.future.set_result(result)
+        session.close()
+
+    def call(self, method: str, timeout: float = 65, **kwargs):
+        future: Future = Future()
+        try:
+            self._queue.put(_Command(method, kwargs, future), timeout=2)
+        except queue.Full as exc:
+            raise RequestError(503, "Browser command queue is full") from exc
+        return future.result(timeout=timeout)
+
+    def close(self) -> None:
+        try:
+            self._queue.put_nowait(None)
+        except queue.Full:
+            return
+        self._thread.join(timeout=10)
+
+
+class SessionStore:
+    def __init__(self, ttl_seconds: int = 43200):
+        self.ttl_seconds = ttl_seconds
+        self._sessions: dict[str, float] = {}
+        self._lock = threading.Lock()
+
+    def create(self) -> str:
+        token = secrets.token_urlsafe(32)
+        now = time.time()
+        with self._lock:
+            self._purge(now)
+            if len(self._sessions) >= 128:
+                oldest = min(self._sessions, key=self._sessions.get)
+                self._sessions.pop(oldest, None)
+            self._sessions[token] = now + self.ttl_seconds
+        return token
+
+    def valid(self, token: str | None) -> bool:
+        if not token:
+            return False
+        now = time.time()
+        with self._lock:
+            self._purge(now)
+            expires = self._sessions.get(token)
+            return expires is not None and expires > now
+
+    def revoke(self, token: str | None) -> None:
+        if not token:
+            return
+        with self._lock:
+            self._sessions.pop(token, None)
+
+    def _purge(self, now: float) -> None:
+        expired = [token for token, expires in self._sessions.items() if expires <= now]
+        for token in expired:
+            self._sessions.pop(token, None)
+
+
+def make_handler(config: Config, controller: BrowserController, sessions: SessionStore):
+    class Handler(BaseHTTPRequestHandler):
+        server_version = "HeadfulAuthTunnel/0.4.0"
+
+        def setup(self) -> None:
+            super().setup()
+            self.connection.settimeout(config.socket_timeout_seconds)
+
+        def log_message(self, fmt: str, *args) -> None:
+            path = urlsplit(self.path).path
+            LOGGER.info("%s %s %s", self.client_address[0], self.command, path)
+
+        def _headers(
+            self,
+            content_type: str,
+            length: int,
+            extra: dict[str, str] | None = None,
+        ) -> None:
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(length))
+            self.send_header("Cache-Control", "no-store, max-age=0")
+            self.send_header("Pragma", "no-cache")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("X-Frame-Options", "DENY")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+            self.send_header(
+                "Content-Security-Policy",
+                "default-src 'self'; img-src 'self' blob: data:; script-src 'self'; "
+                "style-src 'self'; connect-src 'self'; frame-ancestors 'none'; "
+                "base-uri 'none'; form-action 'self'",
+            )
+            if config.tls_enabled:
+                self.send_header("Strict-Transport-Security", "max-age=31536000")
+            if extra:
+                for name, value in extra.items():
+                    self.send_header(name, value)
+
+        def _send_bytes(
+            self,
+            status: int,
+            payload: bytes,
+            content_type: str,
+            extra: dict[str, str] | None = None,
+        ) -> None:
+            self.send_response(status)
+            self._headers(content_type, len(payload), extra)
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def _send_text(
+            self,
+            status: int,
+            text: str,
+            content_type: str = "text/plain; charset=utf-8",
+            extra: dict[str, str] | None = None,
+        ) -> None:
+            self._send_bytes(status, text.encode("utf-8"), content_type, extra)
+
+        def _send_json(self, status: int, payload: Any) -> None:
+            raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            self._send_bytes(status, raw, "application/json; charset=utf-8")
+
+        def _redirect(self, location: str, extra: dict[str, str] | None = None) -> None:
+            headers = {"Location": location}
+            if extra:
+                headers.update(extra)
+            self._send_bytes(303, b"", "text/plain; charset=utf-8", headers)
+
+        def _read_body(self) -> bytes:
+            raw_length = self.headers.get("Content-Length", "0")
+            try:
+                length = int(raw_length)
+            except ValueError as exc:
+                raise RequestError(400, "Invalid Content-Length") from exc
+            if length < 0:
+                raise RequestError(400, "Invalid Content-Length")
+            if length > config.max_request_bytes:
+                raise RequestError(413, "Request body is too large")
+            return self.rfile.read(length)
+
+        def _json_body(self) -> dict[str, Any]:
+            raw = self._read_body()
+            if not raw:
+                return {}
+            try:
+                payload = json.loads(raw)
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                raise RequestError(400, "Request body must be valid JSON") from exc
+            if not isinstance(payload, dict):
+                raise RequestError(400, "JSON body must be an object")
+            return payload
+
+        def _cookie_value(self) -> str | None:
+            return token_from_cookie(self.headers.get("Cookie"), config.session_cookie_name)
+
+        def _authenticated(self) -> bool:
+            supplied = bearer_token(self.headers.get("Authorization"))
+            if supplied and compare_digest(supplied, config.auth_token):
+                return True
+            return sessions.valid(self._cookie_value())
+
+        def _require_auth(self) -> bool:
+            if self._authenticated():
+                return True
+            self._send_json(401, {"error": "Authentication required"})
+            return False
+
+        def _session_cookie(self, session_id: str, *, clear: bool = False) -> str:
+            parts = [
+                f"{config.session_cookie_name}={session_id}",
+                "Path=/",
+                "HttpOnly",
+                "SameSite=Strict",
+            ]
+            if clear:
+                parts.extend(["Max-Age=0", "Expires=Thu, 01 Jan 1970 00:00:00 GMT"])
+            else:
+                parts.append("Max-Age=43200")
+            if config.tls_enabled:
+                parts.append("Secure")
+            return "; ".join(parts)
+
+        def _handle_error(self, exc: BaseException) -> None:
+            if isinstance(exc, RequestError):
+                self._send_json(exc.status, {"error": exc.message})
+                return
+            if isinstance(exc, (ValueError, TypeError)):
+                self._send_json(400, {"error": "Invalid request parameters"})
+                return
+            LOGGER.exception("Request failed")
+            self._send_json(500, {"error": "Internal server error"})
+
+        def do_GET(self) -> None:
+            try:
+                self._do_GET()
+            except BaseException as exc:
+                self._handle_error(exc)
+
+        def _do_GET(self) -> None:
+            parsed = urlsplit(self.path)
+            path = parsed.path
+
+            if path == "/health":
+                try:
+                    health = controller.call("health", timeout=5)
+                except Exception:
+                    health = {"status": "degraded", "browser": False}
+                if not config.expose_health_details:
+                    health = {"status": health["status"]}
+                self._send_json(200 if health["status"] == "ok" else 503, health)
+                return
+
+            if path == "/app.css":
+                self._send_text(200, APP_CSS, "text/css; charset=utf-8")
+                return
+
+            if path == "/" and config.allow_query_token:
+                query_token = parse_qs(parsed.query).get("token", [None])[0]
+                if query_token and compare_digest(query_token, config.auth_token):
+                    session_id = sessions.create()
+                    self._redirect("/", {"Set-Cookie": self._session_cookie(session_id)})
+                    return
+
+            if path == "/":
+                if self._authenticated():
+                    self._send_text(200, APP_HTML, "text/html; charset=utf-8")
+                else:
+                    self._send_text(200, LOGIN_HTML, "text/html; charset=utf-8")
+                return
+
+            if not self._require_auth():
+                return
+
+            if path == "/app.js":
+                self._send_text(200, APP_JS, "application/javascript; charset=utf-8")
+            elif path == "/meta":
+                self._send_json(200, controller.call("meta"))
+            elif path == "/tabs":
+                self._send_json(200, controller.call("tabs"))
+            elif path == "/screenshot":
+                self._send_bytes(200, controller.call("screenshot"), "image/png")
+            elif path == "/page":
+                self._send_json(
+                    200,
+                    controller.call(
+                        "page_snapshot",
+                        include_values=False,
+                        include_sensitive_values=False,
+                    ),
+                )
+            else:
+                self._send_json(404, {"error": "Not found"})
+
+        def do_POST(self) -> None:
+            try:
+                self._do_POST()
+            except BaseException as exc:
+                self._handle_error(exc)
+
+        def _do_POST(self) -> None:
+            path = urlsplit(self.path).path
+
+            if path == "/session":
+                raw = self._read_body()
+                content_type = self.headers.get("Content-Type", "")
+                if "application/json" in content_type:
+                    try:
+                        body = json.loads(raw or b"{}")
+                    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                        raise RequestError(400, "Request body must be valid JSON") from exc
+                    supplied = body.get("token", "") if isinstance(body, dict) else ""
+                else:
+                    supplied = parse_qs(raw.decode("utf-8", errors="strict")).get("token", [""])[0]
+                if not isinstance(supplied, str) or not compare_digest(supplied, config.auth_token):
+                    self._send_json(401, {"error": "Invalid token"})
+                    return
+                session_id = sessions.create()
+                self._redirect("/", {"Set-Cookie": self._session_cookie(session_id)})
+                return
+
+            if path == "/logout":
+                session_id = self._cookie_value()
+                sessions.revoke(session_id)
+                self._redirect(
+                    "/",
+                    {"Set-Cookie": self._session_cookie("", clear=True)},
+                )
+                return
+
+            if not self._require_auth():
+                return
+
+            body = self._json_body()
+            if path == "/navigate":
+                result = controller.call("navigate", url=str(body.get("url", "")))
+            elif path == "/reload":
+                result = controller.call("reload")
+            elif path == "/history/back":
+                result = controller.call("history_back")
+            elif path == "/history/forward":
+                result = controller.call("history_forward")
+            elif path == "/viewport":
+                result = controller.call(
+                    "set_viewport",
+                    width=int(body.get("width", 0)),
+                    height=int(body.get("height", 0)),
+                )
+            elif path == "/click":
+                result = controller.call(
+                    "click",
+                    x=int(body.get("x", -1)),
+                    y=int(body.get("y", -1)),
+                )
+            elif path == "/drag":
+                start = body.get("from") or {}
+                end = body.get("to") or {}
+                if not isinstance(start, dict) or not isinstance(end, dict):
+                    raise RequestError(400, "Drag points must be objects")
+                result = controller.call(
+                    "drag",
+                    from_x=int(start.get("x", -1)),
+                    from_y=int(start.get("y", -1)),
+                    to_x=int(end.get("x", -1)),
+                    to_y=int(end.get("y", -1)),
+                    duration_ms=int(body.get("duration_ms", 500)),
+                )
+            elif path == "/type":
+                result = controller.call("type_text", text=str(body.get("text", "")))
+            elif path == "/key":
+                result = controller.call("press_key", key=str(body.get("key", "")))
+            elif path == "/tabs/focus":
+                result = controller.call("focus_tab", id=str(body.get("id", "")))
+            elif path == "/tabs/close":
+                result = controller.call("close_tab", id=str(body.get("id", "")))
+            elif path == "/dom/fill":
+                result = controller.call(
+                    "dom_fill",
+                    selector=str(body.get("selector", "")),
+                    value=str(body.get("value", "")),
+                )
+            elif path == "/dom/click":
+                result = controller.call(
+                    "dom_click",
+                    selector=str(body.get("selector", "")),
+                )
+            elif path == "/dom/press":
+                result = controller.call(
+                    "dom_press",
+                    selector=str(body.get("selector", "")),
+                    key=str(body.get("key", "")),
+                )
+            elif path == "/dom/select":
+                result = controller.call(
+                    "dom_select",
+                    selector=str(body.get("selector", "")),
+                    value=str(body.get("value", "")),
+                )
+            elif path == "/page":
+                result = controller.call(
+                    "page_snapshot",
+                    include_values=bool(body.get("include_values", False)),
+                    include_sensitive_values=bool(body.get("include_sensitive_values", False)),
+                )
+            else:
+                self._send_json(404, {"error": "Not found"})
+                return
+            self._send_json(200, result)
+
+    return Handler
+
+
+class TunnelHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
     allow_reuse_address = True
 
 
 def main() -> None:
-    print('SCRAPLING HEADFUL TUNNEL READY', flush=True)
-    print(f'Access Link: http://<host>:{PORT}/?token={TOKEN}', flush=True)
-    print(f'Health: http://<host>:{PORT}/health', flush=True)
-    print(f'Profile: {PROFILE}', flush=True)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     try:
-        state.start()
-    except Exception as e:
-        print(f'Initial browser start failed: {e}', flush=True)
-    with ReusableTCPServer((HOST, PORT), Handler) as httpd:
-        if TLS_CERT and TLS_KEY:
-            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-            ctx.load_cert_chain(TLS_CERT, TLS_KEY)
-            httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
-        try:
-            httpd.serve_forever()
-        finally:
-            state.close()
+        config = Config.from_env()
+    except ValueError as exc:
+        raise SystemExit(f"Configuration error: {exc}") from exc
 
-if __name__ == '__main__':
+    controller = BrowserController(config)
+    controller.start()
+    sessions = SessionStore()
+    server = TunnelHTTPServer(
+        (config.bind_host, config.port),
+        make_handler(config, controller, sessions),
+    )
+
+    if config.tls_enabled:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        context.load_cert_chain(str(config.tls_cert), str(config.tls_key))
+        server.socket = context.wrap_socket(server.socket, server_side=True)
+
+    scheme = "https" if config.tls_enabled else "http"
+    LOGGER.info(
+        "Headful Auth Tunnel listening on %s://%s:%s",
+        scheme,
+        config.bind_host,
+        config.port,
+    )
+    if config.token_file:
+        LOGGER.info("Authentication token file: %s", config.token_file)
+    else:
+        LOGGER.info("Authentication token supplied through AUTH_TOKEN")
+
+    try:
+        server.serve_forever(poll_interval=0.5)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+        controller.close()
+
+
+if __name__ == "__main__":
     main()

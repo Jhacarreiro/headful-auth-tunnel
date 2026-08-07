@@ -1,0 +1,24 @@
+services:
+  headful-auth-tunnel:
+    build: .
+    image: headful-auth-tunnel:0.4.0
+    restart: unless-stopped
+    environment:
+      BIND_HOST: 0.0.0.0
+      PORT: 19192
+      BASE_URL: https://example.com
+      SCREEN_WIDTH: 1440
+      SCREEN_HEIGHT: 1100
+      LOCALE: pt-PT
+      TIMEZONE_ID: Europe/Lisbon
+      ALLOW_PRIVATE_NETWORK_NAVIGATION: "false"
+    ports:
+      # Safer default: expose only on the host. Replace 127.0.0.1 with a LAN/VPN IP when needed.
+      - "127.0.0.1:19192:19192"
+    volumes:
+      - headful-profile:/data/profile
+      - headful-state:/data/state
+
+volumes:
+  headful-profile:
+  headful-state:
