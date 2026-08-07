@@ -599,7 +599,11 @@ def make_handler(config: Config, controller: BrowserController, sessions: Sessio
                 parts.extend(["Max-Age=0", "Expires=Thu, 01 Jan 1970 00:00:00 GMT"])
             else:
                 parts.append("Max-Age=43200")
-            if config.tls_enabled:
+            forwarded_https = (
+                config.trust_forwarded_proto
+                and self.headers.get("X-Forwarded-Proto", "").strip().lower() == "https"
+            )
+            if config.tls_enabled or forwarded_https:
                 parts.append("Secure")
             return "; ".join(parts)
 

@@ -33,6 +33,7 @@ def make_config(tmp_path: Path):
             "allowed_hosts": (),
             "denied_hosts": (),
             "expose_health_details": False,
+            "trust_forwarded_proto": False,
             "tls_cert": None,
             "tls_key": None,
             "max_dom_text_chars": 20000,

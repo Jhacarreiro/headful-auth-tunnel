@@ -223,6 +223,7 @@ Sensitive values are omitted unless `include_sensitive_values` is explicitly ena
 | `MAX_URL_CHARS` | `8192` | Maximum navigation URL length before parsing or DNS resolution. |
 | `SOCKET_TIMEOUT_SECONDS` | `15` | Per-client socket timeout. |
 | `EXPOSE_HEALTH_DETAILS` | `false` | Include browser/tab counts in `/health`. |
+| `TRUST_FORWARDED_PROTO` | `false` | Trust `X-Forwarded-Proto: https` from a controlled reverse proxy when deciding whether session cookies should be `Secure`. |
 | `MAX_DOM_TEXT_CHARS` | `20000` | Maximum page text returned by DOM snapshot. |
 | `MAX_DOM_ELEMENTS` | `250` | Maximum controls/links returned by DOM snapshot. |
 | `TLS_CERT`, `TLS_KEY` | unset | Enable TLS when both paths are configured. |
