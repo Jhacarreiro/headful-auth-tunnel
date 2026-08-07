@@ -4,6 +4,11 @@ import fnmatch
 import ipaddress
 import socket
 import time
+
+try:
+    import idna as _idna  # UTS46 / IDNA-2008 (matches browsers)
+except ImportError:
+    _idna = None
 from dataclasses import dataclass
 from http.cookies import SimpleCookie
 from urllib.parse import urlsplit, urlunsplit
@@ -61,8 +66,18 @@ def validate_navigation_url(url: str, config: Config) -> NavigationDecision:
         return NavigationDecision(False, "URL must include a hostname")
 
     try:
-        hostname = parsed.hostname.encode("idna").decode("ascii").rstrip(".").lower()
-    except UnicodeError:
+        if _idna is not None:
+            # IDNA-2008 (strict, no transitional mapping): matches what
+            # Chromium actually resolves. stdlib encode("idna") is
+            # IDNA-2003/nameprep and diverges - "faß.de" becomes "fass.de"
+            # under 2003 but "xn--fa-hia.de" in the browser, so policy would
+            # check a different hostname than the browser navigates to.
+            # Strict mode also REJECTS ambiguous codepoints (U+00AA, U+212A)
+            # instead of silently remapping them - fail-closed.
+            hostname = _idna.encode(parsed.hostname, uts46=False).decode("ascii").rstrip(".").lower()
+        else:
+            hostname = parsed.hostname.encode("idna").decode("ascii").rstrip(".").lower()
+    except (UnicodeError, _idna.core.IDNAError if _idna is not None else UnicodeError):
         return NavigationDecision(False, "Hostname is not valid IDNA")
 
     if _matches(hostname, config.denied_hosts):
