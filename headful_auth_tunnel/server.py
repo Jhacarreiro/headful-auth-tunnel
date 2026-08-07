@@ -87,6 +87,18 @@ class BrowserSession:
             wait_until="domcontentloaded",
             timeout=self.config.navigation_timeout_ms,
         )
+        # A 302 from BASE_URL to a denied host is followed internally by
+        # Chromium (never routed) - re-validate where we actually landed.
+        final_url = ""
+        try:
+            final_url = self.page.url or ""
+        except Exception:
+            pass
+        if final_url:
+            final_decision = self.policy.validate(final_url, refresh=False)
+            if not final_decision.allowed:
+                self.session.close()
+                raise RuntimeError(f"BASE_URL redirected to blocked host: {final_decision.reason}")
 
     def close(self) -> None:
         if self.session is not None:
@@ -208,6 +220,28 @@ class BrowserSession:
     def screenshot(self) -> bytes:
         return self._current_page().screenshot(type="png", full_page=False)
 
+    def _final_url(self, page) -> str:
+        try:
+            return page.url or ""
+        except Exception:
+            return ""
+
+    def _check_final_url(self, url: str) -> str:
+        """Re-validate the URL a page actually landed on.
+
+        Server-side 302/307 redirects are followed internally by Chromium
+        and never pass through page.route, so the navigation policy only
+        ever saw the ORIGINAL url. A redirect from an allowed origin to a
+        DENIED_HOSTS entry (open redirect, SSO bounce) would otherwise load
+        denied content fully readable through /page and /screenshot.
+        """
+        if not url:
+            return url
+        decision = self.policy.validate(url, refresh=False)
+        if not decision.allowed:
+            raise RequestError(403, f"Redirected to blocked host: {decision.reason}")
+        return decision.normalized_url or url
+
     def navigate(self, url: str) -> dict[str, Any]:
         decision = self.policy.validate(url, refresh=True)
         if not decision.allowed:
@@ -218,24 +252,31 @@ class BrowserSession:
             wait_until="domcontentloaded",
             timeout=self.config.navigation_timeout_ms,
         )
+        self._check_final_url(self._final_url(page))
         return self.meta()
 
     def reload(self) -> dict[str, Any]:
-        self._current_page().reload(
+        page = self._current_page()
+        page.reload(
             wait_until="domcontentloaded", timeout=self.config.navigation_timeout_ms
         )
+        self._check_final_url(self._final_url(page))
         return self.meta()
 
     def history_back(self) -> dict[str, Any]:
-        self._current_page().go_back(
+        page = self._current_page()
+        page.go_back(
             wait_until="domcontentloaded", timeout=self.config.navigation_timeout_ms
         )
+        self._check_final_url(self._final_url(page))
         return self.meta()
 
     def history_forward(self) -> dict[str, Any]:
-        self._current_page().go_forward(
+        page = self._current_page()
+        page.go_forward(
             wait_until="domcontentloaded", timeout=self.config.navigation_timeout_ms
         )
+        self._check_final_url(self._final_url(page))
         return self.meta()
 
     def set_viewport(self, width: int, height: int) -> dict[str, Any]:
