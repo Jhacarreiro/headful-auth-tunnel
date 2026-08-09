@@ -56,6 +56,11 @@ class BrowserSession:
         self.session = StealthySession(
             headless=False,
             user_data_dir=str(self.config.profile_dir),
+            executable_path=(
+                str(self.config.browser_executable_path)
+                if self.config.browser_executable_path
+                else None
+            ),
             locale=self.config.locale,
             timezone_id=self.config.timezone_id,
             timeout=self.config.navigation_timeout_ms,

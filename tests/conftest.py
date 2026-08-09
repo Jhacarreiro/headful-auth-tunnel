@@ -15,6 +15,7 @@ def make_config(tmp_path: Path):
             "port": 6080,
             "base_url": "https://example.com",
             "profile_dir": tmp_path / "profile",
+            "browser_executable_path": None,
             "screen_width": 1440,
             "screen_height": 1100,
             "locale": "en-US",
