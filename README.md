@@ -205,6 +205,7 @@ Sensitive values are omitted unless `include_sensitive_values` is explicitly ena
 | `PORT` | `19192` | HTTP(S) port. |
 | `BASE_URL` | `https://example.com` | Initial page. Must pass the destination policy. |
 | `PROFILE_DIR` | `~/.headful-auth-tunnel/profile` | Persistent profile for the Python entry point; helper script uses `./profile`. |
+| `BROWSER_EXECUTABLE_PATH` | unset | Optional Chromium/Chrome executable to use instead of Patchright's bundled browser. |
 | `TOKEN_FILE` | XDG state directory | Generated token path; helper script uses `./runtime/token`. |
 | `AUTH_TOKEN` | unset | Inline token override, minimum 24 characters. Prefer `TOKEN_FILE`. |
 | `SCREEN_WIDTH` | `1440` | Startup viewport width, 320–7680. |

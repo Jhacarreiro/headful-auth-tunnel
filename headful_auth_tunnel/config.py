@@ -77,6 +77,7 @@ class Config:
     port: int
     base_url: str
     profile_dir: Path
+    browser_executable_path: Path | None
     screen_width: int
     screen_height: int
     locale: str
@@ -137,6 +138,11 @@ class Config:
             port=_env_int("PORT", 19192, 1, 65535),
             base_url=os.getenv("BASE_URL", "https://example.com").strip(),
             profile_dir=profile_dir,
+            browser_executable_path=(
+                Path(os.environ["BROWSER_EXECUTABLE_PATH"]).expanduser()
+                if os.getenv("BROWSER_EXECUTABLE_PATH", "").strip()
+                else None
+            ),
             screen_width=_env_int("SCREEN_WIDTH", 1440, 320, 7680),
             screen_height=_env_int("SCREEN_HEIGHT", 1100, 240, 4320),
             locale=os.getenv("LOCALE", "en-US").strip() or "en-US",
