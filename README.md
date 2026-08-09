@@ -34,7 +34,7 @@ It is useful when automation runs on a headless machine, but a person must occas
 
 ## Non-goals
 
-This project does not solve or bypass CAPTCHAs, anti-bot protections, access controls, paywalls or rate limits. It is a human-control bridge for accounts and systems you are allowed to use.
+The current release does not automate CAPTCHA solving or attempt to bypass anti-bot protections, access controls, paywalls or rate limits. It is a human-control bridge for accounts and systems you are allowed to use. The architecture is intended to support progressively more automated human/machine handoffs over time, including difficult interactive steps where that automation is technically and legally appropriate.
 
 ## Quick start
 
