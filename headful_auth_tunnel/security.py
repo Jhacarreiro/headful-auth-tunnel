@@ -36,6 +36,18 @@ def _matches(hostname: str, patterns: tuple[str, ...]) -> bool:
     return any(fnmatch.fnmatch(hostname, pattern) for pattern in patterns)
 
 
+def _raw_hostname(netloc: str) -> str | None:
+    # urlsplit().hostname Unicode-lowercases first, remapping U+212A (Kelvin)
+    # to "k" before strict IDNA can reject it. Split netloc without case-folding.
+    _, _, hostinfo = netloc.rpartition("@")
+    _, have_open_br, bracketed = hostinfo.partition("[")
+    if have_open_br:
+        hostname, _, _ = bracketed.partition("]")
+    else:
+        hostname, _, _ = hostinfo.partition(":")
+    return hostname or None
+
+
 def _blocked_ip(address: str) -> bool:
     ip = ipaddress.ip_address(address)
     return any(
@@ -65,8 +77,21 @@ def validate_navigation_url(url: str, config: Config) -> NavigationDecision:
     if not parsed.hostname:
         return NavigationDecision(False, "URL must include a hostname")
 
+    raw_host = _raw_hostname(parsed.netloc)
+    if not raw_host:
+        return NavigationDecision(False, "URL must include a hostname")
+
     try:
-        if _idna is not None:
+        direct_ip = ipaddress.ip_address(raw_host)
+    except ValueError:
+        direct_ip = None
+
+    if direct_ip is not None:
+        hostname = str(direct_ip)
+    else:
+        if _idna is None:
+            return NavigationDecision(False, "IDNA-2008 support is unavailable")
+        try:
             # IDNA-2008 (strict, no transitional mapping): matches what
             # Chromium actually resolves. stdlib encode("idna") is
             # IDNA-2003/nameprep and diverges - "faß.de" becomes "fass.de"
@@ -74,11 +99,9 @@ def validate_navigation_url(url: str, config: Config) -> NavigationDecision:
             # check a different hostname than the browser navigates to.
             # Strict mode also REJECTS ambiguous codepoints (U+00AA, U+212A)
             # instead of silently remapping them - fail-closed.
-            hostname = _idna.encode(parsed.hostname, uts46=False).decode("ascii").rstrip(".").lower()
-        else:
-            hostname = parsed.hostname.encode("idna").decode("ascii").rstrip(".").lower()
-    except (UnicodeError, _idna.core.IDNAError if _idna is not None else UnicodeError):
-        return NavigationDecision(False, "Hostname is not valid IDNA")
+            hostname = _idna.encode(raw_host, uts46=False).decode("ascii").rstrip(".").lower()
+        except (UnicodeError, _idna.core.IDNAError):
+            return NavigationDecision(False, "Hostname is not valid IDNA")
 
     if _matches(hostname, config.denied_hosts):
         return NavigationDecision(False, "Hostname is denied by DENIED_HOSTS")
@@ -89,18 +112,13 @@ def validate_navigation_url(url: str, config: Config) -> NavigationDecision:
     if config.allow_private_network_navigation:
         return NavigationDecision(True, "Private network navigation enabled", candidate)
 
-    if hostname == "localhost" or hostname.endswith(_INTERNAL_SUFFIXES) or "." not in hostname:
-        return NavigationDecision(False, "Local and internal hostnames are blocked")
-
-    try:
-        direct_ip = ipaddress.ip_address(hostname)
-    except ValueError:
-        direct_ip = None
-
     if direct_ip is not None:
         if _blocked_ip(str(direct_ip)):
             return NavigationDecision(False, "Private or special-use IP addresses are blocked")
         return NavigationDecision(True, "Public IP address", candidate)
+
+    if hostname == "localhost" or hostname.endswith(_INTERNAL_SUFFIXES) or "." not in hostname:
+        return NavigationDecision(False, "Local and internal hostnames are blocked")
 
     try:
         port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
@@ -142,7 +160,7 @@ class NavigationPolicy:
         if not parsed.hostname:
             return validate_navigation_url(url, self.config)
 
-        host = parsed.hostname.rstrip(".").lower()
+        host = (_raw_hostname(parsed.netloc) or parsed.hostname).rstrip(".")
         try:
             port = parsed.port
         except ValueError:
