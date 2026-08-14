@@ -11,7 +11,16 @@ DISPLAY=${DISPLAY:-:99}
 SCREEN_WIDTH=${SCREEN_WIDTH:-1440}
 SCREEN_HEIGHT=${SCREEN_HEIGHT:-1100}
 export DISPLAY SCREEN_WIDTH SCREEN_HEIGHT
-RUNTIME_DIR=${RUNTIME_DIR:-$ROOT_DIR/runtime}
+# $ROOT_DIR/runtime is read-only under systemd ProtectSystem=strict
+if [ -z "${RUNTIME_DIR:-}" ]; then
+  if mkdir -p "$ROOT_DIR/runtime" 2>/dev/null && [ -w "$ROOT_DIR/runtime" ]; then
+    RUNTIME_DIR=$ROOT_DIR/runtime
+  elif mkdir -p /var/lib/headful-auth-tunnel 2>/dev/null && [ -w /var/lib/headful-auth-tunnel ]; then
+    RUNTIME_DIR=/var/lib/headful-auth-tunnel
+  else
+    RUNTIME_DIR=/run/headful-auth-tunnel
+  fi
+fi
 XVFB_PID_FILE=${XVFB_PID_FILE:-$RUNTIME_DIR/xvfb.pid}
 PID_FILE=${PID_FILE:-$RUNTIME_DIR/tunnel.pid}
 mkdir -p "$RUNTIME_DIR"

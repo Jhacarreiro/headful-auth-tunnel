@@ -21,7 +21,6 @@ stop_owned_process() {
     rm -f "$pid_file"
     return 1
   fi
-  return 0
   kill "$pid" 2>/dev/null || true
   i=0
   while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 40 ]; do
