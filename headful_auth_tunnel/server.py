@@ -119,9 +119,12 @@ class BrowserSession:
         # Only adopt the new page as "current" if we have no current page at
         # all (first tab). window.open / target=_blank popups must NOT
         # silently retarget /navigate, /click, /type, /page - the operator
-        # should pick a tab explicitly via /tabs/focus. (A delayed "page"
-        # event for a just-closed popup previously re-pointed self.page at a
-        # dead page and hung the next command.)
+        # should pick a tab explicitly via /tabs/focus. A delayed "page"
+        # event for a just-closed popup must not be installed either: that
+        # leaves a dead pointer and the next command silently falls back to
+        # another tab.
+        if page.is_closed():
+            return
         try:
             page.set_viewport_size(self.viewport)
         except Exception:
@@ -145,10 +148,20 @@ class BrowserSession:
             try:
                 fresh = self.context.new_page()
                 fresh.set_viewport_size(self.viewport)
-                self.page = fresh
-                return fresh
             except Exception:
                 raise RuntimeError("No browser page is available") from None
+            self.page = fresh
+            try:
+                decision = self.policy.validate(self.config.base_url, refresh=True)
+                if decision.allowed:
+                    fresh.goto(
+                        decision.normalized_url or self.config.base_url,
+                        wait_until="domcontentloaded",
+                        timeout=self.config.navigation_timeout_ms,
+                    )
+            except Exception:
+                LOGGER.exception("Failed to open BASE_URL on recovered page")
+            return fresh
         if self.page not in pages:
             self.page = pages[-1]
         return self.page
