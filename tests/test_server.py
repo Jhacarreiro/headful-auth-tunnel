@@ -153,9 +153,15 @@ class SnapshotPage:
     def __init__(self):
         self.closed = False
         self.arguments = None
+        self.url = "https://example.com"
+        self.goto_calls = []
 
     def is_closed(self):
         return self.closed
+
+    def goto(self, url, **kwargs):
+        self.goto_calls.append(url)
+        self.url = url
 
     def evaluate(self, script, arguments):
         self.arguments = arguments

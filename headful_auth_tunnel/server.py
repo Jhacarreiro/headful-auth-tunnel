@@ -81,6 +81,17 @@ class BrowserSession:
 
         pages = [page for page in self.context.pages if not page.is_closed()]
         self.page = pages[0] if pages else self.context.new_page()
+        # Attach frame navigation guard to each existing page
+        for p in pages:
+            try:
+                p.on("framenavigated", self._on_frame_navigated)
+            except Exception:
+                LOGGER.exception("Failed to attach frame navigation handler to existing page")
+        if self.page not in pages:
+            try:
+                self.page.on("framenavigated", self._on_frame_navigated)
+            except Exception:
+                LOGGER.exception("Failed to attach frame navigation handler to new page")
         self.page.set_viewport_size(self.viewport)
         self.page.goto(
             decision.normalized_url or self.config.base_url,
@@ -134,6 +145,50 @@ class BrowserSession:
             page.bring_to_front()
         except Exception:
             LOGGER.exception("Failed to activate new page")
+        # Cover browser-triggered navigations (click/DOM/meta-refresh/JS)
+        # that bypass explicit control methods: validate every page attach.
+        try:
+            page.on("framenavigated", self._on_frame_navigated)
+        except Exception:
+            LOGGER.exception("Failed to attach frame navigation handler")
+
+    def _on_frame_navigated(self, frame) -> None:
+        """Best-effort revalidation for navigations not via control API."""
+        try:
+            # Only main-frame navigations change the document URL exposed via
+            # /page and /screenshot; sub-frames are already filtered by route.
+            try:
+                is_main = frame.is_main_frame() if callable(getattr(frame, "is_main_frame", None)) else getattr(frame, "is_main_frame", True)
+            except Exception:
+                is_main = True
+            if not is_main:
+                return
+            url = ""
+            try:
+                url = frame.url or ""
+            except Exception:
+                # Fallback to page url if frame.url unavailable
+                try:
+                    url = frame.page.url if hasattr(frame, "page") and frame.page else ""
+                except Exception:
+                    url = ""
+            if not url:
+                return
+            # Allow about:blank etc, force fresh DNS for final landing.
+            decision = self.policy.validate(url, allow_non_network=True, refresh=True)
+            if not decision.allowed:
+                LOGGER.warning("Blocked frame navigation to %s: %s", url, decision.reason)
+                try:
+                    # Prefer quarantining via the frame's page
+                    target = frame.page if hasattr(frame, "page") and frame.page else self._current_page()
+                    target.goto("about:blank")
+                except Exception:
+                    try:
+                        self._current_page().goto("about:blank")
+                    except Exception:
+                        LOGGER.exception("Failed to quarantine frame-blocked page")
+        except Exception:
+            LOGGER.exception("Frame navigation validation failed")
 
     def _pages(self) -> list[Any]:
         if self.context is None:
@@ -218,7 +273,9 @@ class BrowserSession:
         return self.tabs()
 
     def screenshot(self) -> bytes:
-        return self._current_page().screenshot(type="png", full_page=False)
+        page = self._current_page()
+        self._check_final_url(page)
+        return page.screenshot(type="png", full_page=False)
 
     def _final_url(self, page) -> str:
         try:
@@ -237,8 +294,12 @@ class BrowserSession:
         """
         url = self._final_url(page)
         if not url:
-            return url
-        decision = self.policy.validate(url, refresh=True)
+            try:
+                page.goto("about:blank")
+            except Exception:
+                LOGGER.exception("Failed to quarantine page with unreadable URL")
+            raise RequestError(403, "Blocked: could not determine final URL")
+        decision = self.policy.validate(url, allow_non_network=True, refresh=True)
         if not decision.allowed:
             try:
                 page.goto("about:blank")
@@ -382,6 +443,7 @@ class BrowserSession:
         include_sensitive_values: bool = False,
     ) -> dict[str, Any]:
         page = self._current_page()
+        self._check_final_url(page)
         return page.evaluate(
             """({elementLimit, textLimit, includeValues, includeSensitiveValues}) => {
               const sensitive = new RegExp(
