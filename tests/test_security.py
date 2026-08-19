@@ -148,3 +148,17 @@ def test_policy_ipv6_and_port_origin(make_config):
     decision = policy.validate("http://[2001:4860:4860::8888]:8443/path")
     assert decision.allowed is True
     assert decision.reason == "Public IP address"
+
+
+def test_direct_ip_invalid_port_is_rejected_before_allow(make_config):
+    for url in [
+        "https://93.184.216.34:99999/",
+        "https://93.184.216.34:65536/login",
+        "http://[2001:4860:4860::8888]:99999/",
+        "http://[2001:4860:4860::8888]:65536/login",
+        "http://[::1]:99999/",
+    ]:
+        decision = validate_navigation_url(url, make_config())
+        assert decision.allowed is False
+        assert decision.reason == "URL contains an invalid port"
+        assert "Public IP" not in decision.reason

@@ -86,6 +86,13 @@ def validate_navigation_url(url: str, config: Config) -> NavigationDecision:
     except ValueError:
         direct_ip = None
 
+    # Validate port before any allow decision — direct IP literals must not
+    # be classified as "Public IP address" when the port is out of range.
+    try:
+        _port = parsed.port
+    except ValueError:
+        return NavigationDecision(False, "URL contains an invalid port")
+
     if direct_ip is not None:
         hostname = str(direct_ip)
     else:
@@ -120,10 +127,7 @@ def validate_navigation_url(url: str, config: Config) -> NavigationDecision:
     if hostname == "localhost" or hostname.endswith(_INTERNAL_SUFFIXES) or "." not in hostname:
         return NavigationDecision(False, "Local and internal hostnames are blocked")
 
-    try:
-        port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
-    except ValueError:
-        return NavigationDecision(False, "URL contains an invalid port")
+    port = _port or (443 if parsed.scheme.lower() == "https" else 80)
     try:
         results = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
     except socket.gaierror:
