@@ -93,6 +93,29 @@ def test_login_uses_http_only_cookie_and_no_query_token(make_config):
         thread.join(timeout=5)
 
 
+def test_forwarded_https_marks_session_cookie_secure(make_config):
+    config = make_config(trust_forwarded_proto=True)
+    server, thread = start_server(config)
+    try:
+        encoded = urlencode({"token": config.auth_token})
+        status, headers, _ = request(
+            server,
+            "POST",
+            "/session",
+            encoded,
+            {
+                "Content-Type": "application/x-www-form-urlencoded",
+                "X-Forwarded-Proto": "https",
+            },
+        )
+        assert status == 303
+        assert "Secure" in headers["Set-Cookie"]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 def test_bearer_auth_and_security_headers(make_config):
     config = make_config()
     server, thread = start_server(config)
