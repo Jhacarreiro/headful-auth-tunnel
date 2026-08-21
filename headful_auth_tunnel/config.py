@@ -109,6 +109,7 @@ class Config:
     port: int
     base_url: str
     profile_dir: Path
+    browser_executable_path: Path | None
     screen_width: int
     screen_height: int
     locale: str
@@ -127,6 +128,7 @@ class Config:
     allowed_hosts: tuple[str, ...]
     denied_hosts: tuple[str, ...]
     expose_health_details: bool
+    trust_forwarded_proto: bool
     tls_cert: Path | None
     tls_key: Path | None
     max_dom_text_chars: int
@@ -168,6 +170,11 @@ class Config:
             port=_env_int("PORT", 19192, 1, 65535),
             base_url=os.getenv("BASE_URL", "https://example.com").strip(),
             profile_dir=profile_dir,
+            browser_executable_path=(
+                Path(os.environ["BROWSER_EXECUTABLE_PATH"]).expanduser()
+                if os.getenv("BROWSER_EXECUTABLE_PATH", "").strip()
+                else None
+            ),
             screen_width=_env_int("SCREEN_WIDTH", 1440, 320, 7680),
             screen_height=_env_int("SCREEN_HEIGHT", 1100, 240, 4320),
             locale=os.getenv("LOCALE", "en-US").strip() or "en-US",
@@ -186,6 +193,7 @@ class Config:
             allowed_hosts=_env_csv("ALLOWED_HOSTS"),
             denied_hosts=_env_csv("DENIED_HOSTS"),
             expose_health_details=_env_bool("EXPOSE_HEALTH_DETAILS", False),
+            trust_forwarded_proto=_env_bool("TRUST_FORWARDED_PROTO", False),
             tls_cert=tls_cert,
             tls_key=tls_key,
             max_dom_text_chars=_env_int("MAX_DOM_TEXT_CHARS", 20000, 1000, 250000),
