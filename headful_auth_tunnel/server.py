@@ -56,6 +56,11 @@ class BrowserSession:
         self.session = StealthySession(
             headless=False,
             user_data_dir=str(self.config.profile_dir),
+            executable_path=(
+                str(self.config.browser_executable_path)
+                if self.config.browser_executable_path
+                else None
+            ),
             locale=self.config.locale,
             timezone_id=self.config.timezone_id,
             timeout=self.config.navigation_timeout_ms,
@@ -642,7 +647,11 @@ def make_handler(config: Config, controller: BrowserController, sessions: Sessio
                 parts.extend(["Max-Age=0", "Expires=Thu, 01 Jan 1970 00:00:00 GMT"])
             else:
                 parts.append("Max-Age=43200")
-            if config.tls_enabled:
+            forwarded_https = (
+                config.trust_forwarded_proto
+                and self.headers.get("X-Forwarded-Proto", "").strip().lower() == "https"
+            )
+            if config.tls_enabled or forwarded_https:
                 parts.append("Secure")
             return "; ".join(parts)
 
