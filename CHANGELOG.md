@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.1 - 2026-08-07
+
+- Add opt-in `TRUST_FORWARDED_PROTO` support so deployments behind a controlled HTTPS reverse proxy can still emit `Secure` session cookies.
+- Add optional `BROWSER_EXECUTABLE_PATH` so deployments can use an existing Chromium/Chrome installation instead of Patchright's bundled browser.
+
 ## 0.4.0 - 2026-08-07
 
 - Use generic `en-US`/`UTC` browser defaults for the public package while keeping locale/timezone configurable.
