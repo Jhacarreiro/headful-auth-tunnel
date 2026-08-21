@@ -197,7 +197,9 @@ class SnapshotContext:
 
 
 def test_snapshot_can_explicitly_include_sensitive_values(make_config):
-    session = BrowserSession(make_config())
+    # _check_final_url re-validates the landed URL; allow example.com
+    # explicitly so the guard short-circuits without DNS (netless sandboxes).
+    session = BrowserSession(make_config(allowed_hosts=("example.com",)))
     page = SnapshotPage()
     session.context = SnapshotContext(page)
     session.page = page
