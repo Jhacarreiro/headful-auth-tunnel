@@ -47,6 +47,11 @@ class BrowserSession:
         self.viewport = {"width": config.screen_width, "height": config.screen_height}
         self.instance_id = secrets.token_hex(8)
         self.started_at = time.time()
+        # Per-host throttle for forced-DNS revalidation on frame navigations.
+        # A hostile page navigating rapidly between subdomains of the same
+        # host could otherwise spin the resolver with refresh=True lookups.
+        self._frame_dns_check_at: dict[str, float] = {}
+        self._frame_dns_min_interval = 5.0  # seconds between forced refreshes per host
 
     def start(self) -> None:
         decision = self.policy.validate(self.config.base_url, refresh=True)
@@ -179,8 +184,25 @@ class BrowserSession:
                     url = ""
             if not url:
                 return
-            # Allow about:blank etc, force fresh DNS for final landing.
-            decision = self.policy.validate(url, allow_non_network=True, refresh=True)
+            # Force fresh DNS for the final landing, but throttle per host so a
+            # hostile page cycling navigations cannot spin the resolver. The
+            # first navigation to a host always revalidates with fresh DNS;
+            # rapid repeats within the window reuse the policy cache (the URL
+            # itself is still fully validated on every navigation).
+            try:
+                host = (urlsplit(url).hostname or "").lower()
+            except Exception:
+                host = ""
+            now = time.time()
+            last_check = self._frame_dns_check_at.get(host, 0.0) if host else float("inf")
+            force_refresh = (now - last_check) >= self._frame_dns_min_interval
+            if host and force_refresh:
+                self._frame_dns_check_at[host] = now
+                if len(self._frame_dns_check_at) > 256:
+                    # Bound memory: drop the oldest entries.
+                    for k in sorted(self._frame_dns_check_at, key=lambda k: self._frame_dns_check_at[k])[:128]:
+                        self._frame_dns_check_at.pop(k, None)
+            decision = self.policy.validate(url, allow_non_network=True, refresh=force_refresh)
             if not decision.allowed:
                 LOGGER.warning("Blocked frame navigation to %s: %s", url, decision.reason)
                 try:
