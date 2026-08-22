@@ -70,6 +70,9 @@ else
 fi
 
 cd "$ROOT_DIR"
+readiness_nonce=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')
+HEADFUL_READINESS_NONCE=$readiness_nonce
+export HEADFUL_READINESS_NONCE
 nohup "$@" >"$LOG_FILE" 2>&1 &
 pid=$!
 printf '%s\n' "$pid" > "$PID_FILE"
@@ -82,9 +85,26 @@ while [ "$i" -lt 60 ]; do
   if ! kill -0 "$pid" 2>/dev/null; then
     break
   fi
-  if command -v curl >/dev/null 2>&1 && curl -kfsS --max-time 2 "$scheme://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
-    ready=1
-    break
+  if command -v curl >/dev/null 2>&1; then
+    # TLS: loopback uses a self-signed certificate; with a trusted CA
+    # bundle available (TLS_CA_FILE), validate via --cacert, otherwise -k is
+    # intentional for the local self-signed cert. The handshake still
+    # requires the per-start nonce, so -k does not reintroduce the squatter
+    # false-success.
+    if [ "$scheme" = https ] && [ -n "${TLS_CA_FILE:-}" ] && [ -f "$TLS_CA_FILE" ]; then
+      health=$(curl -fsS --max-time 2 --cacert "$TLS_CA_FILE" "$scheme://127.0.0.1:$PORT/health" 2>/dev/null || true)
+    else
+      health=$(curl -kfsS --max-time 2 "$scheme://127.0.0.1:$PORT/health" 2>/dev/null || true)
+    fi
+    # Verify BOTH that our pid is still alive AND the responder is the
+    # tunnel we spawned (health JSON echoes the per-start nonce). A foreign
+    # process squatting on the port can return {"status":"ok"} too - without
+    # this, start.sh would print "Started" while the real tunnel died with
+    # Address already in use.
+    if kill -0 "$pid" 2>/dev/null && printf '%s' "$health" | grep -Fq "\"nonce\":\"$readiness_nonce\""; then
+      ready=1
+      break
+    fi
   fi
   sleep 0.5
   i=$((i + 1))

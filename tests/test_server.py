@@ -342,3 +342,30 @@ def test_current_page_uses_normalized_recovery_url(make_config):
     recovered = session._current_page()
 
     assert recovered.goto_calls[0]["url"] == "https://example.com/"
+def test_health_includes_readiness_nonce_when_set(monkeypatch, make_config):
+    monkeypatch.setenv("HEADFUL_READINESS_NONCE", "0123456789abcdef0123456789abcdef")
+    config = make_config()
+    server, thread = start_server(config)
+    try:
+        status, _, payload = request(server, "GET", "/health")
+        body = json.loads(payload)
+        assert status == 200
+        assert body["nonce"] == "0123456789abcdef0123456789abcdef"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_health_omits_nonce_when_unset(monkeypatch, make_config):
+    monkeypatch.delenv("HEADFUL_READINESS_NONCE", raising=False)
+    config = make_config()
+    server, thread = start_server(config)
+    try:
+        status, _, payload = request(server, "GET", "/health")
+        assert status == 200
+        assert json.loads(payload) == {"status": "ok"}
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
