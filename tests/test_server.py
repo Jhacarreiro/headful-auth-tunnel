@@ -6,6 +6,7 @@ import threading
 import time
 from urllib.parse import urlencode
 
+from headful_auth_tunnel.security import NavigationDecision
 from headful_auth_tunnel.server import (
     BrowserSession,
     SessionStore,
@@ -214,3 +215,130 @@ def test_browser_metadata_declares_headful_persistent_single_instance(make_confi
     assert first["browser_mode"] == "headful"
     assert first["persistent_profile"] is True
     assert first["browser_instance_id"] == second["browser_instance_id"]
+
+
+class LifecyclePage:
+    def __init__(self, *, closed=False, url="about:blank"):
+        self.closed = closed
+        self.url = url
+        self.viewport = None
+        self.goto_calls = []
+
+    def is_closed(self):
+        return self.closed
+
+    def set_viewport_size(self, viewport):
+        if self.closed:
+            raise RuntimeError("Page is closed")
+        self.viewport = viewport
+
+    def goto(self, url, wait_until=None, timeout=None):
+        if self.closed:
+            raise RuntimeError("Page is closed")
+        self.goto_calls.append({"url": url, "wait_until": wait_until, "timeout": timeout})
+        self.url = url
+
+    def title(self):
+        return ""
+
+
+class LifecycleContext:
+    def __init__(self, pages=None):
+        self.pages = list(pages or [])
+
+    def new_page(self):
+        page = LifecyclePage()
+        self.pages.append(page)
+        return page
+
+
+def _allow_base(url, refresh=False, **_kwargs):
+    return NavigationDecision(True, "allowed", url)
+
+
+def test_on_page_rejects_closed_incoming_page(make_config):
+    session = BrowserSession(make_config())
+    live = LifecyclePage(url="https://example.com/app")
+    closed_popup = LifecyclePage(closed=True, url="about:blank")
+    session.context = LifecycleContext([live, closed_popup])
+    session.page = None
+
+    session._on_page(closed_popup)
+
+    assert session.page is None
+    assert closed_popup.viewport is None
+
+
+def test_on_page_does_not_install_delayed_closed_popup_over_invalid_current(make_config):
+    session = BrowserSession(make_config())
+    dead_current = LifecyclePage(closed=True, url="https://example.com/old")
+    live = LifecyclePage(url="https://example.com/keep")
+    closed_popup = LifecyclePage(closed=True, url="about:blank")
+    session.context = LifecycleContext([dead_current, live, closed_popup])
+    session.page = dead_current
+
+    session._on_page(closed_popup)
+
+    assert session.page is dead_current
+    assert session._current_page() is live
+
+
+def test_on_page_does_not_retarget_live_current_tab(make_config):
+    session = BrowserSession(make_config())
+    current = LifecyclePage(url="https://example.com/app")
+    popup = LifecyclePage(url="https://example.com/popup")
+    session.context = LifecycleContext([current, popup])
+    session.page = current
+
+    session._on_page(popup)
+
+    assert session.page is current
+    assert popup.viewport == session.viewport
+
+
+def test_on_page_adopts_live_page_when_current_is_gone(make_config):
+    session = BrowserSession(make_config())
+    incoming = LifecyclePage(url="https://example.com/fresh")
+    session.context = LifecycleContext([incoming])
+    session.page = LifecyclePage(closed=True)
+
+    session._on_page(incoming)
+
+    assert session.page is incoming
+    assert incoming.viewport == session.viewport
+
+
+def test_current_page_recovers_zero_tabs_at_configured_base_url(make_config):
+    session = BrowserSession(make_config(base_url="https://example.com/login"))
+    session.policy.validate = _allow_base
+    closed = LifecyclePage(closed=True)
+    session.context = LifecycleContext([closed])
+    session.page = closed
+
+    recovered = session._current_page()
+
+    assert recovered is not closed
+    assert recovered.closed is False
+    assert session.page is recovered
+    assert recovered.goto_calls == [
+        {
+            "url": "https://example.com/login",
+            "wait_until": "domcontentloaded",
+            "timeout": session.config.navigation_timeout_ms,
+        }
+    ]
+    assert recovered.url == "https://example.com/login"
+    assert recovered.viewport == session.viewport
+
+
+def test_current_page_uses_normalized_recovery_url(make_config):
+    session = BrowserSession(make_config(base_url="https://example.com"))
+    session.policy.validate = lambda url, refresh=False, **_kwargs: NavigationDecision(
+        True, "allowed", "https://example.com/"
+    )
+    session.context = LifecycleContext([])
+    session.page = None
+
+    recovered = session._current_page()
+
+    assert recovered.goto_calls[0]["url"] == "https://example.com/"
