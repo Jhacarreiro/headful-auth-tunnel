@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import queue
@@ -188,10 +189,8 @@ class BrowserSession:
         if stored is None:
             type(self)._page_id_counter += 1
             stored = format(self._page_id_counter, "x")
-            try:
+            with contextlib.suppress(Exception):
                 page._hat_page_id = stored  # type: ignore[attr-defined]
-            except Exception:
-                pass
         return stored
 
     def health(self) -> dict[str, Any]:
