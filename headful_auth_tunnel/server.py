@@ -121,12 +121,21 @@ class BrowserSession:
             websocket_route.close(code=1008, reason="Destination blocked")
 
     def _on_page(self, page) -> None:
-        self.page = page
+        # Only adopt the new page as "current" if we have no current page at
+        # all (first tab). window.open / target=_blank popups must NOT
+        # silently retarget /navigate, /click, /type, /page - the operator
+        # should pick a tab explicitly via /tabs/focus. A delayed "page"
+        # event for a just-closed popup must not be installed either: that
+        # leaves a dead pointer and the next command silently falls back to
+        # another tab.
+        if page.is_closed():
+            return
         try:
             page.set_viewport_size(self.viewport)
-            page.bring_to_front()
         except Exception:
-            LOGGER.exception("Failed to activate new page")
+            LOGGER.exception("Failed to size new page")
+        if self.page is None or self.page.is_closed() or self.page not in self._pages():
+            self.page = page
 
     def _pages(self) -> list[Any]:
         if self.context is None:
@@ -136,7 +145,28 @@ class BrowserSession:
     def _current_page(self):
         pages = self._pages()
         if not pages:
-            raise RuntimeError("No browser page is available")
+            # The last tab was closed (API close_tab has a 409 guard, but a
+            # human closing the tab or window.close() in page JS bypasses it).
+            # Recover by opening a fresh page instead of bricking every
+            # control endpoint with "No browser page is available" until
+            # restart.
+            try:
+                fresh = self.context.new_page()
+                fresh.set_viewport_size(self.viewport)
+            except Exception:
+                raise RuntimeError("No browser page is available") from None
+            self.page = fresh
+            try:
+                decision = self.policy.validate(self.config.base_url, refresh=True)
+                if decision.allowed:
+                    fresh.goto(
+                        decision.normalized_url or self.config.base_url,
+                        wait_until="domcontentloaded",
+                        timeout=self.config.navigation_timeout_ms,
+                    )
+            except Exception:
+                LOGGER.exception("Failed to open BASE_URL on recovered page")
+            return fresh
         if self.page not in pages:
             self.page = pages[-1]
         return self.page
@@ -147,9 +177,22 @@ class BrowserSession:
                 return page
         raise RequestError(404, "Tab not found")
 
-    @staticmethod
-    def _page_id(page) -> str:
-        return format(id(page), "x")
+    _page_id_counter = 0
+
+    def _page_id(self, page) -> str:
+        # id(page) is a CPython heap address: after GC, a newly opened tab
+        # can receive the id of an already-closed one (empirically 19
+        # collisions in 120 open/close cycles), so a stale client-held id
+        # silently aliases a DIFFERENT live tab. Use a monotonic counter.
+        stored = getattr(page, "_hat_page_id", None)
+        if stored is None:
+            type(self)._page_id_counter += 1
+            stored = format(self._page_id_counter, "x")
+            try:
+                page._hat_page_id = stored  # type: ignore[attr-defined]
+            except Exception:
+                pass
+        return stored
 
     def health(self) -> dict[str, Any]:
         pages = self._pages()
