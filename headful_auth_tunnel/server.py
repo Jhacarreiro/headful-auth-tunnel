@@ -494,6 +494,7 @@ class SessionStore:
     def __init__(self, ttl_seconds: int = 43200):
         self.ttl_seconds = ttl_seconds
         self._sessions: dict[str, float] = {}
+        self._last_used: dict[str, float] = {}
         self._lock = threading.Lock()
 
     def create(self) -> str:
@@ -501,10 +502,23 @@ class SessionStore:
         now = time.time()
         with self._lock:
             self._purge(now)
+            # Evict the least-recently-USED session, not the oldest-created:
+            # a long-lived active session must not be killed by new logins.
             if len(self._sessions) >= 128:
-                oldest = min(self._sessions, key=self._sessions.get)
-                self._sessions.pop(oldest, None)
+                # drop any orphan LRU entries so we never evict a stale key
+                for _tok in list(self._last_used):
+                    if _tok not in self._sessions:
+                        self._last_used.pop(_tok, None)
+                if not self._last_used:
+                    # fallback: no LRU data (should not happen) — evict oldest
+                    lru = min(self._sessions, key=self._sessions.get)
+                    self._sessions.pop(lru, None)
+                else:
+                    lru = min(self._last_used, key=self._last_used.get)
+                self._sessions.pop(lru, None)
+                self._last_used.pop(lru, None)
             self._sessions[token] = now + self.ttl_seconds
+            self._last_used[token] = now
         return token
 
     def valid(self, token: str | None) -> bool:
@@ -514,18 +528,27 @@ class SessionStore:
         with self._lock:
             self._purge(now)
             expires = self._sessions.get(token)
-            return expires is not None and expires > now
+            ok = expires is not None and expires > now
+            if ok:
+                self._last_used[token] = now
+            return ok
 
     def revoke(self, token: str | None) -> None:
         if not token:
             return
         with self._lock:
             self._sessions.pop(token, None)
+            self._last_used.pop(token, None)
 
     def _purge(self, now: float) -> None:
         expired = [token for token, expires in self._sessions.items() if expires <= now]
         for token in expired:
             self._sessions.pop(token, None)
+            self._last_used.pop(token, None)
+        # purge stale LRU entries for already-expired/revoked sessions
+        for token in list(self._last_used):
+            if token not in self._sessions:
+                self._last_used.pop(token, None)
 
 
 def make_handler(config: Config, controller: BrowserController, sessions: SessionStore):
@@ -692,6 +715,14 @@ def make_handler(config: Config, controller: BrowserController, sessions: Sessio
             if path == "/" and config.allow_query_token:
                 query_token = parse_qs(parsed.query).get("token", [None])[0]
                 if query_token and compare_digest(query_token, config.auth_token):
+                    # Reuse an already-valid session instead of minting a new
+                    # one per hit: repeated ?token= logins otherwise multiply
+                    # live 12h session cookies and the old ones are never
+                    # revoked.
+                    existing = self._cookie_value()
+                    if existing and sessions.valid(existing):
+                        self._redirect("/")
+                        return
                     session_id = sessions.create()
                     self._redirect("/", {"Set-Cookie": self._session_cookie(session_id)})
                     return
@@ -748,6 +779,10 @@ def make_handler(config: Config, controller: BrowserController, sessions: Sessio
                     supplied = parse_qs(raw.decode("utf-8", errors="strict")).get("token", [""])[0]
                 if not isinstance(supplied, str) or not compare_digest(supplied, config.auth_token):
                     self._send_json(401, {"error": "Invalid token"})
+                    return
+                existing = self._cookie_value()
+                if existing and sessions.valid(existing):
+                    self._redirect("/")
                     return
                 session_id = sessions.create()
                 self._redirect("/", {"Set-Cookie": self._session_cookie(session_id)})
