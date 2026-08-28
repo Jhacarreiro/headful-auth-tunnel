@@ -4,11 +4,15 @@ import http.client
 import json
 import threading
 import time
+import types
 from urllib.parse import urlencode
+
+import pytest
 
 from headful_auth_tunnel.security import NavigationDecision
 from headful_auth_tunnel.server import (
     BrowserSession,
+    RequestError,
     SessionStore,
     TunnelHTTPServer,
     make_handler,
@@ -172,9 +176,16 @@ class SnapshotPage:
     def __init__(self):
         self.closed = False
         self.arguments = None
+        self.url = "https://example.com"
+        self.goto_calls = []
+        self.frames = []
 
     def is_closed(self):
         return self.closed
+
+    def goto(self, url, **kwargs):
+        self.goto_calls.append(url)
+        self.url = url
 
     def evaluate(self, script, arguments):
         self.arguments = arguments
@@ -187,7 +198,9 @@ class SnapshotContext:
 
 
 def test_snapshot_can_explicitly_include_sensitive_values(make_config):
-    session = BrowserSession(make_config())
+    # _check_final_url re-validates the landed URL; allow example.com
+    # explicitly so the guard short-circuits without DNS (netless sandboxes).
+    session = BrowserSession(make_config(allowed_hosts=("example.com",)))
     page = SnapshotPage()
     session.context = SnapshotContext(page)
     session.page = page
@@ -223,6 +236,7 @@ class LifecyclePage:
         self.url = url
         self.viewport = None
         self.goto_calls = []
+        self.frames = []
 
     def is_closed(self):
         return self.closed
@@ -342,3 +356,367 @@ def test_current_page_uses_normalized_recovery_url(make_config):
     recovered = session._current_page()
 
     assert recovered.goto_calls[0]["url"] == "https://example.com/"
+
+
+class FakePage:
+    def __init__(self, url="", *, navigate_on_click=None):
+        self.url = url
+        self.goto_calls = []
+        self.frames = []
+        self.navigate_on_click = navigate_on_click
+        self.mouse = types.SimpleNamespace(click=self._click)
+        self.closed = False
+
+    def is_closed(self):
+        return self.closed
+
+    def goto(self, url, **kwargs):
+        self.goto_calls.append(url)
+        self.url = url
+
+    def _click(self, x, y):
+        if self.navigate_on_click is not None:
+            self.url = self.navigate_on_click
+
+
+def test_final_url_check_refreshes_policy_every_landing(make_config):
+    session = BrowserSession(make_config())
+    recorded = []
+
+    class RecordingPolicy:
+        def validate(self, url, *, allow_non_network=False, refresh=False):
+            recorded.append(
+                {
+                    "url": url,
+                    "allow_non_network": allow_non_network,
+                    "refresh": refresh,
+                }
+            )
+            return NavigationDecision(True, "ok", url)
+
+    session.policy = RecordingPolicy()
+    fake_page = types.SimpleNamespace(url="https://ok.test/", frames=[])
+
+    result = session._check_final_url(fake_page)
+
+    assert recorded[0]["refresh"] is True
+    assert result == "https://ok.test/"
+
+
+def test_final_url_check_quarantines_blocked_page(make_config):
+    session = BrowserSession(make_config(denied_hosts=("blocked.test",)))
+    fake_page = FakePage(url="https://blocked.test/x")
+
+    with pytest.raises(RequestError) as exc:
+        session._check_final_url(fake_page)
+
+    assert exc.value.status == 403
+    assert fake_page.goto_calls == ["about:blank"]
+
+
+def test_browser_action_click_revalidates_final_url(make_config):
+    session = BrowserSession(make_config(denied_hosts=("blocked.test",)))
+    fake_page = FakePage(
+        url="https://ok.test/",
+        navigate_on_click="https://blocked.test/landed",
+    )
+    session.context = types.SimpleNamespace(pages=[fake_page])
+    session.page = fake_page
+
+    with pytest.raises(RequestError) as exc:
+        session.click(100, 100)
+
+    assert exc.value.status == 403
+    assert fake_page.goto_calls == ["about:blank"]
+
+
+class FramePage(FakePage):
+    def __init__(self, url="https://ok.test/"):
+        super().__init__(url=url)
+        self.screenshot_calls = 0
+        self.main_frame = FakeFrame(url, page=self, parent=None)
+        self.frames = [self.main_frame]
+
+    def screenshot(self, **_kwargs):
+        self.screenshot_calls += 1
+        return b"png"
+
+
+class FakeFrame:
+    def __init__(self, url, *, page, parent, unreadable=False):
+        self._url = url
+        self.page = page
+        self.parent_frame = parent
+        self.unreadable = unreadable
+        self.goto_calls = []
+
+    @property
+    def url(self):
+        if self.unreadable:
+            raise RuntimeError("frame URL unavailable")
+        return self._url
+
+    def goto(self, url, **_kwargs):
+        self.goto_calls.append(url)
+        self._url = url
+        self.unreadable = False
+
+
+def test_frame_navigation_revalidates_same_host_with_fresh_dns_every_time(make_config):
+    session = BrowserSession(make_config())
+    recorded = []
+
+    class RecordingPolicy:
+        def validate(self, url, *, allow_non_network=False, refresh=False):
+            recorded.append((url, allow_non_network, refresh))
+            return NavigationDecision(True, "ok", url)
+
+    session.policy = RecordingPolicy()
+    page = FramePage("https://same.test/")
+    session.context = types.SimpleNamespace(pages=[page])
+    session.page = page
+
+    session._on_frame_navigated(page.main_frame)
+    session._on_frame_navigated(page.main_frame)
+
+    assert recorded == [
+        ("https://same.test/", True, True),
+        ("https://same.test/", True, True),
+    ]
+
+
+def test_blocked_subframe_is_quarantined_and_latched(make_config):
+    session = BrowserSession(make_config(denied_hosts=("blocked.test",)))
+    page = FramePage("https://ok.test/")
+    subframe = FakeFrame(
+        "https://blocked.test/secret",
+        page=page,
+        parent=page.main_frame,
+    )
+    page.frames.append(subframe)
+    session.context = types.SimpleNamespace(pages=[page])
+    session.page = page
+
+    session._on_frame_navigated(subframe)
+
+    assert subframe.goto_calls == ["about:blank"]
+    assert page.goto_calls == []
+    with pytest.raises(RequestError) as exc:
+        session.screenshot()
+    assert exc.value.status == 403
+    assert page.screenshot_calls == 0
+
+
+def test_unreadable_subframe_fails_closed(make_config):
+    session = BrowserSession(make_config(allowed_hosts=("ok.test",)))
+    page = FramePage("https://ok.test/")
+    subframe = FakeFrame("", page=page, parent=page.main_frame, unreadable=True)
+    page.frames.append(subframe)
+    session.context = types.SimpleNamespace(pages=[page])
+    session.page = page
+
+    session._on_frame_navigated(subframe)
+
+    assert subframe.goto_calls == ["about:blank"]
+    with pytest.raises(RequestError) as exc:
+        session.page_snapshot()
+    assert exc.value.status == 403
+
+
+def test_screenshot_revalidates_subframes_if_event_hook_was_missed(make_config):
+    session = BrowserSession(make_config())
+
+    class DeterministicPolicy:
+        def validate(self, url, *, allow_non_network=False, refresh=False):
+            if "blocked.test" in url:
+                return NavigationDecision(False, "blocked by test policy", None)
+            return NavigationDecision(True, "ok", url)
+
+    session.policy = DeterministicPolicy()
+    page = FramePage("https://ok.test/")
+    subframe = FakeFrame(
+        "https://blocked.test/secret",
+        page=page,
+        parent=page.main_frame,
+    )
+    page.frames.append(subframe)
+    session.context = types.SimpleNamespace(pages=[page])
+    session.page = page
+
+    with pytest.raises(RequestError) as exc:
+        session.screenshot()
+
+    assert exc.value.status == 403
+    assert subframe.goto_calls == ["about:blank"]
+    assert page.screenshot_calls == 0
+
+
+def test_unreadable_page_url_fails_closed(make_config):
+    session = BrowserSession(make_config())
+
+    class UnreadablePage(FakePage):
+        @property
+        def url(self):
+            raise RuntimeError("URL unavailable")
+
+        @url.setter
+        def url(self, value):
+            self._stored_url = value
+
+    page = UnreadablePage("https://ok.test/")
+
+    with pytest.raises(RequestError) as exc:
+        session._check_final_url(page)
+
+    assert exc.value.status == 403
+    assert page.goto_calls == ["about:blank"]
+
+
+def test_browser_action_refuses_already_blocked_page_before_click(make_config):
+    session = BrowserSession(make_config(denied_hosts=("blocked.test",)))
+    fake_page = FakePage(url="https://blocked.test/already-there")
+    clicks = []
+    fake_page.mouse = types.SimpleNamespace(click=lambda x, y: clicks.append((x, y)))
+    session.context = types.SimpleNamespace(pages=[fake_page])
+    session.page = fake_page
+
+    with pytest.raises(RequestError) as exc:
+        session.click(100, 100)
+
+    assert exc.value.status == 403
+    assert clicks == []
+    assert fake_page.goto_calls == ["about:blank"]
+
+
+def test_blocked_latch_uses_monotonic_page_id(make_config):
+    session = BrowserSession(make_config())
+    page = FramePage("https://ok.test/")
+    page_id = session._page_id(page)
+
+    session._latch_blocked_page(page, "blocked for test")
+
+    assert session._blocked_page_reasons == {page_id: "blocked for test"}
+    with pytest.raises(RequestError) as exc:
+        session._check_final_url(page)
+    assert exc.value.status == 403
+    assert session._blocked_page_reasons == {}
+
+
+def test_frame_dns_churn_is_bounded_and_fails_closed(make_config, monkeypatch):
+    session = BrowserSession(make_config())
+    recorded = []
+
+    class RecordingPolicy:
+        def validate(self, url, *, allow_non_network=False, refresh=False):
+            recorded.append((url, refresh))
+            return NavigationDecision(True, "ok", url)
+
+    session.policy = RecordingPolicy()
+    page = FramePage("https://burst.test/")
+    session.context = types.SimpleNamespace(pages=[page])
+    session.page = page
+    monkeypatch.setattr(time, "monotonic", lambda: 100.0)
+
+    for _ in range(session._frame_dns_max_per_window):
+        session._on_frame_navigated(page.main_frame)
+    session._on_frame_navigated(page.main_frame)
+
+    assert len(recorded) == session._frame_dns_max_per_window
+    assert page.goto_calls == ["about:blank"]
+    with pytest.raises(RequestError) as exc:
+        session._check_final_url(page)
+    assert exc.value.status == 403
+    assert "DNS churn" in exc.value.message
+
+
+def test_frame_enumeration_failure_fails_closed(make_config):
+    session = BrowserSession(make_config())
+
+    class BrokenFramesPage(FakePage):
+        @property
+        def frames(self):
+            raise RuntimeError("frame inventory unavailable")
+
+        @frames.setter
+        def frames(self, _value):
+            pass
+
+    page = BrokenFramesPage("https://ok.test/")
+
+    with pytest.raises(RequestError) as exc:
+        session._check_final_url(page)
+
+    assert exc.value.status == 403
+    assert "enumerate page frames" in exc.value.message
+    assert page.goto_calls == ["about:blank"]
+
+
+def test_defensive_frame_sweep_uses_same_dns_budget(make_config, monkeypatch):
+    session = BrowserSession(make_config())
+    recorded = []
+
+    class RecordingPolicy:
+        def validate(self, url, *, allow_non_network=False, refresh=False):
+            recorded.append((url, refresh))
+            return NavigationDecision(True, "ok", url)
+
+    session.policy = RecordingPolicy()
+    page = FramePage("https://same.test/")
+    for i in range(session._frame_dns_max_per_window):
+        page.frames.append(
+            FakeFrame(f"https://same.test/frame-{i}", page=page, parent=page.main_frame)
+        )
+    session.context = types.SimpleNamespace(pages=[page])
+    session.page = page
+    monkeypatch.setattr(time, "monotonic", lambda: 200.0)
+
+    with pytest.raises(RequestError) as exc:
+        session.screenshot()
+
+    assert exc.value.status == 403
+    assert "DNS churn" in exc.value.message
+    assert len(recorded) == session._frame_dns_max_per_window
+    assert page.screenshot_calls == 0
+
+
+def test_global_frame_dns_budget_bounds_unique_hosts_and_prunes(make_config, monkeypatch):
+    session = BrowserSession(make_config())
+    recorded = []
+    clock = {"now": 300.0}
+
+    class RecordingPolicy:
+        def validate(self, url, *, allow_non_network=False, refresh=False):
+            recorded.append((url, refresh))
+            return NavigationDecision(True, "ok", url)
+
+    session.policy = RecordingPolicy()
+    page = FramePage("https://root.test/")
+    session.context = types.SimpleNamespace(pages=[page])
+    session.page = page
+    monkeypatch.setattr(time, "monotonic", lambda: clock["now"])
+
+    for i in range(session._frame_dns_global_max_per_window):
+        frame = FakeFrame(
+            f"https://host-{i}.test/",
+            page=page,
+            parent=page.main_frame,
+        )
+        session._on_frame_navigated(frame)
+
+    overflow = FakeFrame(
+        "https://overflow.test/",
+        page=page,
+        parent=page.main_frame,
+    )
+    session._on_frame_navigated(overflow)
+
+    assert len(recorded) == session._frame_dns_global_max_per_window
+    assert overflow.goto_calls == ["about:blank"]
+    assert len(session._frame_dns_events) <= session._frame_dns_global_max_per_window
+
+    clock["now"] += session._frame_dns_window_seconds + 0.1
+    fresh = FakeFrame("https://fresh.test/", page=page, parent=page.main_frame)
+    session._on_frame_navigated(fresh)
+
+    assert list(session._frame_dns_events) == ["fresh.test"]
+    assert len(session._frame_dns_global_events) == 1

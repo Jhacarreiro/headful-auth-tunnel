@@ -48,6 +48,17 @@ class BrowserSession:
         self.viewport = {"width": config.screen_width, "height": config.screen_height}
         self.instance_id = secrets.token_hex(8)
         self.started_at = time.time()
+        # Browser-triggered blocked landings are quarantined immediately and
+        # latched so the next control/read request fails closed even if the
+        # quarantine has already moved the frame to about:blank.
+        self._blocked_page_reasons: dict[str, str] = {}
+        # Browser frame events can be attacker-amplified. Bound fresh DNS work
+        # per host; excess churn fails closed instead of reusing a stale allow.
+        self._frame_dns_events: dict[str, list[float]] = {}
+        self._frame_dns_global_events: list[float] = []
+        self._frame_dns_window_seconds = 1.0
+        self._frame_dns_max_per_window = 8
+        self._frame_dns_global_max_per_window = 32
 
     def start(self) -> None:
         decision = self.policy.validate(self.config.base_url, refresh=True)
@@ -87,12 +98,30 @@ class BrowserSession:
 
         pages = [page for page in self.context.pages if not page.is_closed()]
         self.page = pages[0] if pages else self.context.new_page()
+        # Attach frame navigation guard to each existing page
+        for p in pages:
+            try:
+                p.on("framenavigated", self._on_frame_navigated)
+            except Exception:
+                LOGGER.exception("Failed to attach frame navigation handler to existing page")
+        if self.page not in pages:
+            try:
+                self.page.on("framenavigated", self._on_frame_navigated)
+            except Exception:
+                LOGGER.exception("Failed to attach frame navigation handler to new page")
         self.page.set_viewport_size(self.viewport)
         self.page.goto(
             decision.normalized_url or self.config.base_url,
             wait_until="domcontentloaded",
             timeout=self.config.navigation_timeout_ms,
         )
+        # Chromium follows server-side redirects internally, so validate the
+        # actual landing (including subframes) after the initial navigation.
+        try:
+            self._check_final_url(self.page)
+        except RequestError as exc:
+            self.session.close()
+            raise RuntimeError(f"BASE_URL final landing blocked: {exc.message}") from exc
 
     def close(self) -> None:
         if self.session is not None:
@@ -135,8 +164,126 @@ class BrowserSession:
             page.set_viewport_size(self.viewport)
         except Exception:
             LOGGER.exception("Failed to size new page")
+        # Cover browser-triggered navigations (click/DOM/meta-refresh/JS)
+        # that bypass explicit control methods: validate every page attach.
+        try:
+            page.on("framenavigated", self._on_frame_navigated)
+        except Exception:
+            LOGGER.exception("Failed to attach frame navigation handler")
         if self.page is None or self.page.is_closed() or self.page not in self._pages():
             self.page = page
+
+    def _page_for_frame(self, frame):
+        try:
+            page = frame.page
+            return page() if callable(page) else page
+        except Exception:
+            return None
+
+    def _quarantine_landing(self, page, frame=None) -> None:
+        """Move a blocked landing to about:blank, preferring only the bad subframe."""
+        is_subframe = False
+        if frame is not None:
+            try:
+                parent = frame.parent_frame
+                parent = parent() if callable(parent) else parent
+                is_subframe = parent is not None
+            except Exception:
+                is_subframe = False
+        if is_subframe:
+            try:
+                frame.goto(
+                    "about:blank",
+                    wait_until="domcontentloaded",
+                    timeout=self.config.navigation_timeout_ms,
+                )
+                return
+            except Exception:
+                LOGGER.exception("Failed to quarantine blocked subframe; quarantining page")
+        if page is not None:
+            try:
+                page.goto("about:blank")
+            except Exception:
+                LOGGER.exception("Failed to quarantine blocked page")
+
+    def _latch_blocked_page(self, page, reason: str) -> None:
+        if page is not None:
+            self._blocked_page_reasons[self._page_id(page)] = reason
+
+    def _consume_frame_dns_budget(self, url: str) -> None:
+        parsed = urlsplit(url)
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+            return
+
+        host = parsed.hostname.rstrip(".").lower()
+        now = time.monotonic()
+        cutoff = now - self._frame_dns_window_seconds
+
+        self._frame_dns_global_events = [
+            stamp for stamp in self._frame_dns_global_events if stamp >= cutoff
+        ]
+        pruned: dict[str, list[float]] = {}
+        for existing_host, stamps in self._frame_dns_events.items():
+            recent = [stamp for stamp in stamps if stamp >= cutoff]
+            if recent:
+                pruned[existing_host] = recent
+        self._frame_dns_events = pruned
+
+        host_recent = self._frame_dns_events.get(host, [])
+        if len(self._frame_dns_global_events) >= self._frame_dns_global_max_per_window:
+            raise RequestError(403, "Blocked: excessive total frame DNS churn")
+        if len(host_recent) >= self._frame_dns_max_per_window:
+            raise RequestError(403, "Blocked: excessive frame navigation DNS churn")
+
+        host_recent.append(now)
+        self._frame_dns_events[host] = host_recent
+        self._frame_dns_global_events.append(now)
+
+    def _validate_frame_landing(self, frame, page, *, latch: bool) -> str:
+        try:
+            url = frame.url or ""
+        except Exception:
+            url = ""
+        if not url:
+            reason = "Blocked: could not determine frame URL"
+            self._quarantine_landing(page, frame)
+            if latch:
+                self._latch_blocked_page(page, reason)
+            raise RequestError(403, reason)
+
+        try:
+            self._consume_frame_dns_budget(url)
+        except RequestError as exc:
+            self._quarantine_landing(page, frame)
+            if latch:
+                self._latch_blocked_page(page, exc.message)
+            raise
+        decision = self.policy.validate(url, allow_non_network=True, refresh=True)
+        if not decision.allowed:
+            reason = f"Redirected to blocked host: {decision.reason}"
+            self._quarantine_landing(page, frame)
+            if latch:
+                self._latch_blocked_page(page, reason)
+            raise RequestError(403, reason)
+        return decision.normalized_url or url
+
+    def _on_frame_navigated(self, frame) -> None:
+        """Fail closed on every browser-triggered frame landing with fresh DNS."""
+        page = self._page_for_frame(frame)
+        if page is None:
+            try:
+                page = self._current_page()
+            except Exception:
+                page = None
+        try:
+            self._validate_frame_landing(frame, page, latch=True)
+        except RequestError as exc:
+            LOGGER.warning("Blocked frame navigation: %s", exc.message)
+        except Exception:
+            reason = "Blocked: frame navigation validation failed"
+            self._latch_blocked_page(page, reason)
+            self._quarantine_landing(page, frame)
+            LOGGER.exception("Frame navigation validation failed; landing quarantined")
 
     def _pages(self) -> list[Any]:
         if self.context is None:
@@ -199,6 +346,7 @@ class BrowserSession:
 
     def meta(self) -> dict[str, Any]:
         page = self._current_page()
+        self._check_final_url(page)
         try:
             title = page.title()
         except Exception:
@@ -221,6 +369,7 @@ class BrowserSession:
         current = self._current_page()
         items = []
         for page in self._pages():
+            self._check_final_url(page)
             try:
                 title = page.title()
             except Exception:
@@ -253,44 +402,109 @@ class BrowserSession:
         return self.tabs()
 
     def screenshot(self) -> bytes:
-        return self._current_page().screenshot(type="png", full_page=False)
+        page = self._current_page()
+        self._check_final_url(page)
+        return page.screenshot(type="png", full_page=False)
+
+    def _final_url(self, page) -> str:
+        try:
+            return page.url or ""
+        except Exception:
+            return ""
+
+    def _check_final_url(self, page) -> str:
+        """Re-validate every frame actually visible through a browser page.
+
+        Request routing only sees outgoing fetches. Chromium can follow redirects
+        internally and a subframe can expose content through screenshots/DOM, so
+        every landing is rechecked with fresh DNS before any read/control surface
+        returns data.
+        """
+        latched = self._blocked_page_reasons.pop(self._page_id(page), None)
+        if latched:
+            raise RequestError(403, latched)
+
+        try:
+            frames = page.frames
+            frames = frames() if callable(frames) else frames
+            frames = list(frames or [])
+        except Exception as exc:
+            reason = "Blocked: could not enumerate page frames"
+            self._quarantine_landing(page)
+            self._latch_blocked_page(page, reason)
+            raise RequestError(403, reason) from exc
+
+        if frames:
+            main_result = ""
+            try:
+                main_frame = page.main_frame
+                main_frame = main_frame() if callable(main_frame) else main_frame
+            except Exception:
+                main_frame = None
+            for frame in frames:
+                result = self._validate_frame_landing(frame, page, latch=False)
+                if not main_result or frame is main_frame:
+                    main_result = result
+            return main_result
+
+        url = self._final_url(page)
+        if not url:
+            self._quarantine_landing(page)
+            raise RequestError(403, "Blocked: could not determine final URL")
+        decision = self.policy.validate(url, allow_non_network=True, refresh=True)
+        if not decision.allowed:
+            self._quarantine_landing(page)
+            raise RequestError(403, f"Redirected to blocked host: {decision.reason}")
+        return decision.normalized_url or url
+
+    def _check_all_pages(self) -> None:
+        for candidate in self._pages():
+            self._check_final_url(candidate)
+
+    def _checked_current_page(self):
+        page = self._current_page()
+        self._check_all_pages()
+        return page
 
     def navigate(self, url: str) -> dict[str, Any]:
         decision = self.policy.validate(url, refresh=True)
         if not decision.allowed:
             raise RequestError(403, decision.reason)
-        page = self._current_page()
+        page = self._checked_current_page()
         page.goto(
             decision.normalized_url or url,
             wait_until="domcontentloaded",
             timeout=self.config.navigation_timeout_ms,
         )
+        self._check_all_pages()
         return self.meta()
 
     def reload(self) -> dict[str, Any]:
-        self._current_page().reload(
-            wait_until="domcontentloaded", timeout=self.config.navigation_timeout_ms
-        )
+        page = self._checked_current_page()
+        page.reload(wait_until="domcontentloaded", timeout=self.config.navigation_timeout_ms)
+        self._check_all_pages()
         return self.meta()
 
     def history_back(self) -> dict[str, Any]:
-        self._current_page().go_back(
-            wait_until="domcontentloaded", timeout=self.config.navigation_timeout_ms
-        )
+        page = self._checked_current_page()
+        page.go_back(wait_until="domcontentloaded", timeout=self.config.navigation_timeout_ms)
+        self._check_all_pages()
         return self.meta()
 
     def history_forward(self) -> dict[str, Any]:
-        self._current_page().go_forward(
-            wait_until="domcontentloaded", timeout=self.config.navigation_timeout_ms
-        )
+        page = self._checked_current_page()
+        page.go_forward(wait_until="domcontentloaded", timeout=self.config.navigation_timeout_ms)
+        self._check_all_pages()
         return self.meta()
 
     def set_viewport(self, width: int, height: int) -> dict[str, Any]:
         if not 320 <= width <= 7680 or not 240 <= height <= 4320:
             raise RequestError(400, "Viewport must be between 320×240 and 7680×4320")
+        self._check_all_pages()
         self.viewport = {"width": width, "height": height}
         for page in self._pages():
             page.set_viewport_size(self.viewport)
+        self._check_all_pages()
         return self.meta()
 
     def _point(self, x: int, y: int) -> tuple[int, int]:
@@ -301,7 +515,9 @@ class BrowserSession:
 
     def click(self, x: int, y: int) -> dict[str, bool]:
         x, y = self._point(x, y)
-        self._current_page().mouse.click(x, y)
+        page = self._checked_current_page()
+        page.mouse.click(x, y)
+        self._check_all_pages()
         return {"ok": True}
 
     def drag(
@@ -316,50 +532,62 @@ class BrowserSession:
         to_x, to_y = self._point(to_x, to_y)
         duration_ms = max(50, min(duration_ms, 5000))
         steps = max(5, min(100, duration_ms // 20))
-        mouse = self._current_page().mouse
+        page = self._checked_current_page()
+        mouse = page.mouse
         mouse.move(from_x, from_y)
         mouse.down()
         try:
             mouse.move(to_x, to_y, steps=steps)
         finally:
             mouse.up()
+        self._check_all_pages()
         return {"ok": True}
 
     def type_text(self, text: str) -> dict[str, bool]:
         if len(text) > self.config.max_type_text_chars:
             raise RequestError(400, "Text is too long")
-        self._current_page().keyboard.type(text)
+        page = self._checked_current_page()
+        page.keyboard.type(text)
+        self._check_all_pages()
         return {"ok": True}
 
     def press_key(self, key: str) -> dict[str, bool]:
         key = key.strip()
         if not key or len(key) > 100:
             raise RequestError(400, "Key must contain between 1 and 100 characters")
-        self._current_page().keyboard.press(key)
+        page = self._checked_current_page()
+        page.keyboard.press(key)
+        self._check_all_pages()
         return {"ok": True}
 
     def dom_fill(self, selector: str, value: str) -> dict[str, bool]:
         selector = self._validate_selector(selector)
-        self._current_page().locator(selector).first.fill(value, timeout=10000)
+        page = self._checked_current_page()
+        page.locator(selector).first.fill(value, timeout=10000)
+        self._check_all_pages()
         return {"ok": True}
 
     def dom_click(self, selector: str) -> dict[str, bool]:
         selector = self._validate_selector(selector)
-        self._current_page().locator(selector).first.click(timeout=10000)
+        page = self._checked_current_page()
+        page.locator(selector).first.click(timeout=10000)
+        self._check_all_pages()
         return {"ok": True}
 
     def dom_press(self, selector: str, key: str) -> dict[str, bool]:
         selector = self._validate_selector(selector)
         if not key or len(key) > 100:
             raise RequestError(400, "Invalid key")
-        self._current_page().locator(selector).first.press(key, timeout=10000)
+        page = self._checked_current_page()
+        page.locator(selector).first.press(key, timeout=10000)
+        self._check_all_pages()
         return {"ok": True}
 
     def dom_select(self, selector: str, value: str) -> dict[str, Any]:
         selector = self._validate_selector(selector)
-        selected = (
-            self._current_page().locator(selector).first.select_option(value=value, timeout=10000)
-        )
+        page = self._checked_current_page()
+        selected = page.locator(selector).first.select_option(value=value, timeout=10000)
+        self._check_all_pages()
         return {"ok": True, "selected": selected}
 
     @staticmethod
@@ -375,6 +603,7 @@ class BrowserSession:
         include_sensitive_values: bool = False,
     ) -> dict[str, Any]:
         page = self._current_page()
+        self._check_final_url(page)
         return page.evaluate(
             """({elementLimit, textLimit, includeValues, includeSensitiveValues}) => {
               const sensitive = new RegExp(
