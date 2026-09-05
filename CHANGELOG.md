@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.7 - 2026-09-05
+
+### Security compatibility hardening
+
+- Normalize non-IP hostnames with UTS #46 non-transitional IDNA before allow/deny matching, DNS resolution and navigation-policy caching, aligning policy decisions with modern browser hostname normalization.
+- Publish generated token files atomically without clobbering an existing first-start winner; the visible token target is linked only after complete contents are flushed and fsynced.
+- Remove application/Python version disclosure from the HTTP `Server` header.
+- Add explicit `HEAD`, `OPTIONS` and disabled `TRACE` handling with resource-accurate `Allow` headers; `204 OPTIONS` responses do not emit misleading body headers.
+
 ## 0.4.6 - 2026-09-05
 
 ### Readiness and HTTP admission hardening

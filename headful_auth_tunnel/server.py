@@ -16,7 +16,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urljoin, urlsplit
 
-from . import __version__
 from .browser import make_browser_backend
 from .config import Config
 from .security import NavigationPolicy, bearer_token, token_from_cookie
@@ -879,7 +878,11 @@ class BrowserController:
 
 def make_handler(config: Config, controller: BrowserController, sessions: SessionStore):
     class Handler(BaseHTTPRequestHandler):
-        server_version = f"HeadfulAuthTunnel/{__version__}"
+        server_version = "HeadfulAuthTunnel"
+        sys_version = ""
+
+        def version_string(self) -> str:
+            return self.server_version
 
         def setup(self) -> None:
             super().setup()
@@ -904,12 +907,14 @@ def make_handler(config: Config, controller: BrowserController, sessions: Sessio
 
         def _headers(
             self,
-            content_type: str,
-            length: int,
+            content_type: str | None,
+            length: int | None,
             extra: dict[str, str] | None = None,
         ) -> None:
-            self.send_header("Content-Type", content_type)
-            self.send_header("Content-Length", str(length))
+            if content_type is not None:
+                self.send_header("Content-Type", content_type)
+            if length is not None:
+                self.send_header("Content-Length", str(length))
             self.send_header("Cache-Control", "no-store, max-age=0")
             self.send_header("Pragma", "no-cache")
             self.send_header("X-Content-Type-Options", "nosniff")
@@ -938,7 +943,17 @@ def make_handler(config: Config, controller: BrowserController, sessions: Sessio
             self.send_response(status)
             self._headers(content_type, len(payload), extra)
             self.end_headers()
-            self.wfile.write(payload)
+            if self.command != "HEAD":
+                self.wfile.write(payload)
+
+        def _send_no_content(
+            self,
+            status: int,
+            extra: dict[str, str] | None = None,
+        ) -> None:
+            self.send_response(status)
+            self._headers(None, None, extra)
+            self.end_headers()
 
         def _send_text(
             self,
@@ -1032,6 +1047,84 @@ def make_handler(config: Config, controller: BrowserController, sessions: Sessio
                 return
             LOGGER.exception("Request failed")
             self._send_json(500, {"error": "Internal server error"})
+
+        def _allowed_methods(self, path: str) -> str | None:
+            get_paths = {
+                "/",
+                "/app.css",
+                "/app.js",
+                "/health",
+                "/meta",
+                "/page",
+                "/screenshot",
+                "/tabs",
+            }
+            post_paths = {
+                "/click",
+                "/dom/click",
+                "/dom/fill",
+                "/dom/press",
+                "/dom/select",
+                "/drag",
+                "/history/back",
+                "/history/forward",
+                "/key",
+                "/logout",
+                "/navigate",
+                "/page",
+                "/pointer/cancel",
+                "/pointer/down",
+                "/pointer/move",
+                "/pointer/up",
+                "/reload",
+                "/session",
+                "/tabs/close",
+                "/tabs/focus",
+                "/type",
+                "/viewport",
+            }
+            methods: list[str] = []
+            if path in get_paths:
+                methods.extend(["GET", "HEAD"])
+            if path in post_paths:
+                methods.append("POST")
+            if not methods:
+                return None
+            methods.append("OPTIONS")
+            return ", ".join(methods)
+
+        def do_HEAD(self) -> None:
+            try:
+                self._do_GET()
+            except BaseException as exc:
+                self._handle_error(exc)
+
+        def do_OPTIONS(self) -> None:
+            try:
+                path = self._request_target().path
+                allow = self._allowed_methods(path)
+                if allow is None:
+                    self._send_json(404, {"error": "Not found"})
+                    return
+                self._send_no_content(204, {"Allow": allow})
+            except BaseException as exc:
+                self._handle_error(exc)
+
+        def do_TRACE(self) -> None:
+            try:
+                path = self._request_target().path
+                allow = self._allowed_methods(path)
+                if allow is None:
+                    self._send_json(404, {"error": "Not found"})
+                    return
+                self._send_bytes(
+                    405,
+                    b"",
+                    "text/plain; charset=utf-8",
+                    {"Allow": allow},
+                )
+            except BaseException as exc:
+                self._handle_error(exc)
 
         def do_GET(self) -> None:
             try:

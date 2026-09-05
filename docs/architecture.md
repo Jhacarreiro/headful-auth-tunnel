@@ -76,6 +76,10 @@ Request logging is defensive even when the HTTP parser has not populated `comman
 
 The local `scripts/start.sh` launcher also proves process identity, not just port reachability. It generates a cryptographically random per-start nonce, passes it to the child, and declares readiness only when the child PID is alive and `/health` echoes the same nonce. A stale tunnel or unrelated service already occupying the configured port therefore cannot satisfy readiness. The nonce is ephemeral, launcher-internal state and is not used for authentication.
 
+## HTTP method surface
+
+The server suppresses application and Python version disclosure in the `Server` header. GET resources also support `HEAD`; resource-aware `OPTIONS` advertises only implemented methods plus `OPTIONS`; and `TRACE` is explicitly disabled with `405`. No-content `204` responses omit body-specific `Content-Length`/`Content-Type` headers while retaining the normal security headers.
+
 ## Command serialization
 
 All HTTP requests that touch the browser are converted into commands and executed on the single browser worker thread. This prevents cross-thread Playwright access while still allowing the HTTP server to serve multiple clients concurrently.
@@ -85,6 +89,8 @@ The command queue serializes actions inside this tunnel instance. It does not co
 ## Authentication flow
 
 The long-lived access token comes from `AUTH_TOKEN` or `TOKEN_FILE`.
+
+When `TOKEN_FILE` does not yet exist, generation uses a complete temporary file plus an exclusive no-clobber publication step. The target pathname becomes visible only after token contents are flushed/fsynced; concurrent first-start processes therefore converge on one winner instead of adopting a partially written token.
 
 For the browser UI:
 
@@ -98,6 +104,8 @@ The access token is not stored in JavaScript, routine URLs or the session cookie
 ## Destination policy
 
 Public HTTP and HTTPS destinations are permitted by default. Loopback, private, link-local, reserved and common internal names are blocked.
+
+For non-IP hosts, the policy derives a UTS #46 non-transitional ASCII hostname before deny/allow matching, DNS lookup and origin-cache construction. This keeps hostname interpretation aligned across policy and browser-facing navigation paths; IP literals remain handled as IP addresses rather than IDNA names.
 
 The policy is applied to:
 

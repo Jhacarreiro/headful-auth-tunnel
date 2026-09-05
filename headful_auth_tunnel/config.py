@@ -3,9 +3,60 @@ from __future__ import annotations
 import os
 import re
 import secrets
+import tempfile
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
+
+_TOKEN_MIN_LENGTH = 24
+
+
+def _read_persisted_token(token_file: Path) -> str:
+    token = token_file.read_text(encoding="utf-8").strip()
+    if len(token) < _TOKEN_MIN_LENGTH:
+        raise ValueError(
+            f"Token in {token_file} must contain at least {_TOKEN_MIN_LENGTH} characters"
+        )
+    with suppress(OSError):
+        token_file.chmod(0o600)
+    return token
+
+
+def _publish_token_exclusively(token_file: Path, token: str) -> bool:
+    """Publish a fully-written token atomically without replacing an existing winner."""
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{token_file.name}.",
+        dir=token_file.parent,
+        text=True,
+    )
+    temp_path = Path(temp_name)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            fd = -1
+            handle.write(token + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(temp_path, token_file)
+        except FileExistsError:
+            return False
+        # The target name now points at the already-fsynced inode. Best-effort
+        # fsync of the directory improves durability without weakening startup
+        # on filesystems/platforms that do not expose O_DIRECTORY.
+        if hasattr(os, "O_DIRECTORY"):
+            with suppress(OSError):
+                dir_fd = os.open(token_file.parent, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+        return True
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        with suppress(FileNotFoundError):
+            temp_path.unlink()
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -53,7 +104,7 @@ def load_or_create_token() -> tuple[str, Path | None]:
     inline = os.getenv("AUTH_TOKEN")
     if inline:
         token = inline.strip()
-        if len(token) < 24:
+        if len(token) < _TOKEN_MIN_LENGTH:
             raise ValueError("AUTH_TOKEN must contain at least 24 characters")
         return token, None
 
@@ -63,17 +114,16 @@ def load_or_create_token() -> tuple[str, Path | None]:
         token_file.parent.chmod(0o700)
 
     if token_file.exists():
-        token = token_file.read_text(encoding="utf-8").strip()
-        if len(token) < 24:
-            raise ValueError(f"Token in {token_file} must contain at least 24 characters")
-        with suppress(OSError):
-            token_file.chmod(0o600)
-        return token, token_file
+        return _read_persisted_token(token_file), token_file
 
     token = secrets.token_urlsafe(32)
-    token_file.write_text(token + "\n", encoding="utf-8")
-    token_file.chmod(0o600)
-    return token, token_file
+    if _publish_token_exclusively(token_file, token):
+        return token, token_file
+
+    # Another first-start process won the no-clobber publication race. The
+    # winner's target is linked only after its complete contents are fsynced,
+    # so adopting it never observes our implementation's partial write.
+    return _read_persisted_token(token_file), token_file
 
 
 @dataclass(frozen=True)

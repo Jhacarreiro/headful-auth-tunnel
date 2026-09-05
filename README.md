@@ -82,7 +82,7 @@ TIMEZONE_ID=UTC
 ALLOW_PRIVATE_NETWORK_NAVIGATION=false
 ```
 
-The token is generated automatically when missing and stored with mode `0600`. `start.sh` prints its path, not the secret itself.
+The token is generated automatically when missing and stored with mode `0600`. First-start publication is atomic and no-clobber: competing starters converge on one complete token rather than observing or overwriting a partial target. `start.sh` prints its path, not the secret itself.
 
 Stop with:
 
@@ -136,6 +136,8 @@ The default policy allows normal public `http` and `https` sites and blocks:
 
 DNS decisions are revalidated periodically and explicit top-level navigation forces a fresh lookup. Browser-triggered redirects/frame landings share a budget of 512 distinct network origins per 5-second window by default; repeated events for the same origin reuse the fresh decision within that window.
 
+Before allow/deny matching and DNS resolution, non-IP hostnames are normalized with UTS #46 non-transitional IDNA rules. The same canonical hostname is used for policy matching, DNS resolution and the navigation-policy cache so Unicode spellings cannot cause the browser and policy engine to reason about different hostnames.
+
 Policy precedence is:
 
 1. `DENIED_HOSTS` always blocks.
@@ -182,6 +184,9 @@ The web UI is a live view of the complete headful browser. Login pages, password
 Browser ownership depends on the backend. In `managed` mode, one tunnel process owns one live Chromium context and reuses `PROFILE_DIR` across restarts. In `cdp` mode, Chromium and its profile remain owned by an external service; the tunnel attaches to one selected tab and never closes the external browser. In both modes, every HTTP/UI action is serialized through the same browser worker thread.
 
 The UI supports direct click/drag, navigation, text sending, key presses, viewport changes, tab selection and selector-based editing. **Drag: Off** is the default and uses the stable single-click path for normal controls; enable **Drag: On** only when a continuous pointer gesture is needed, such as a human-operated slider. The visible text-entry button is labelled **Send**; API compatibility remains `POST /type`.
+
+
+The HTTP surface also supports `HEAD` for GET resources and resource-aware `OPTIONS`. `TRACE` is explicitly disabled with `405 Method Not Allowed`. The `Server` response header identifies the product without exposing the application or Python runtime version.
 
 Authenticated API operations include:
 
