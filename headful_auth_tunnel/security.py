@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from http.cookies import SimpleCookie
 from urllib.parse import urlsplit, urlunsplit
 
+import idna
+
 from .config import Config
 
 _INTERNAL_SUFFIXES = (
@@ -29,6 +31,49 @@ class NavigationDecision:
 
 def _matches(hostname: str, patterns: tuple[str, ...]) -> bool:
     return any(fnmatch.fnmatch(hostname, pattern) for pattern in patterns)
+
+
+def _raw_hostname(netloc: str) -> str | None:
+    hostinfo = netloc.rsplit("@", 1)[-1]
+    if hostinfo.startswith("["):
+        end = hostinfo.find("]")
+        return hostinfo[1:end] if end > 1 else None
+    if ":" in hostinfo:
+        hostinfo = hostinfo.rsplit(":", 1)[0]
+    return hostinfo or None
+
+
+def _canonical_hostname(parsed) -> tuple[str | None, ipaddress._BaseAddress | None, str | None]:
+    raw_host = _raw_hostname(parsed.netloc)
+    if not raw_host:
+        return None, None, "URL must include a hostname"
+
+    raw_host = raw_host.rstrip(".")
+    if not raw_host:
+        return None, None, "URL must include a hostname"
+
+    try:
+        direct_ip = ipaddress.ip_address(raw_host)
+    except ValueError:
+        direct_ip = None
+
+    if direct_ip is not None:
+        return str(direct_ip), direct_ip, None
+
+    try:
+        hostname = (
+            idna.encode(
+                raw_host,
+                uts46=True,
+                transitional=False,
+                std3_rules=True,
+            )
+            .decode("ascii")
+            .lower()
+        )
+    except (UnicodeError, idna.IDNAError):
+        return None, None, "Hostname is not valid UTS #46 IDNA"
+    return hostname, None, None
 
 
 def _blocked_ip(address: str) -> bool:
@@ -60,10 +105,14 @@ def validate_navigation_url(url: str, config: Config) -> NavigationDecision:
     if not parsed.hostname:
         return NavigationDecision(False, "URL must include a hostname")
 
+    hostname, direct_ip, host_error = _canonical_hostname(parsed)
+    if host_error or hostname is None:
+        return NavigationDecision(False, host_error or "Hostname is not valid UTS #46 IDNA")
+
     try:
-        hostname = parsed.hostname.encode("idna").decode("ascii").rstrip(".").lower()
-    except UnicodeError:
-        return NavigationDecision(False, "Hostname is not valid IDNA")
+        port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+    except ValueError:
+        return NavigationDecision(False, "URL contains an invalid port")
 
     if _matches(hostname, config.denied_hosts):
         return NavigationDecision(False, "Hostname is denied by DENIED_HOSTS")
@@ -74,23 +123,16 @@ def validate_navigation_url(url: str, config: Config) -> NavigationDecision:
     if config.allow_private_network_navigation:
         return NavigationDecision(True, "Private network navigation enabled", candidate)
 
-    if hostname == "localhost" or hostname.endswith(_INTERNAL_SUFFIXES) or "." not in hostname:
+    if direct_ip is None and (
+        hostname == "localhost" or hostname.endswith(_INTERNAL_SUFFIXES) or "." not in hostname
+    ):
         return NavigationDecision(False, "Local and internal hostnames are blocked")
-
-    try:
-        direct_ip = ipaddress.ip_address(hostname)
-    except ValueError:
-        direct_ip = None
 
     if direct_ip is not None:
         if _blocked_ip(str(direct_ip)):
             return NavigationDecision(False, "Private or special-use IP addresses are blocked")
         return NavigationDecision(True, "Public IP address", candidate)
 
-    try:
-        port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
-    except ValueError:
-        return NavigationDecision(False, "URL contains an invalid port")
     try:
         results = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
     except socket.gaierror:
@@ -127,7 +169,9 @@ class NavigationPolicy:
         if not parsed.hostname:
             return validate_navigation_url(url, self.config)
 
-        host = parsed.hostname.rstrip(".").lower()
+        host, _, host_error = _canonical_hostname(parsed)
+        if host_error or host is None:
+            return NavigationDecision(False, host_error or "Hostname is not valid UTS #46 IDNA")
         try:
             port = parsed.port
         except ValueError:

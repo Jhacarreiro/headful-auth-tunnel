@@ -8,7 +8,7 @@ from headful_auth_tunnel import __version__
 from headful_auth_tunnel.server import make_handler
 
 
-def test_package_and_server_versions_match_pyproject():
+def test_package_version_matches_pyproject_and_server_banner_hides_version():
     match = re.search(
         r"^version = \"([^\"]+)\"$",
         Path("pyproject.toml").read_text(),
@@ -19,7 +19,7 @@ def test_package_and_server_versions_match_pyproject():
     handler = make_handler(SimpleNamespace(), None, None)
 
     assert __version__ == expected
-    assert handler.server_version == f"HeadfulAuthTunnel/{expected}"
+    assert handler.server_version == "HeadfulAuthTunnel"
 
 
 def test_ui_labels_text_entry_button_send():

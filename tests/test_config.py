@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import os
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 
-from headful_auth_tunnel.config import Config
+from headful_auth_tunnel import config as config_mod
+from headful_auth_tunnel.config import Config, load_or_create_token
 
 RELEVANT_ENV = {
     "AUTH_TOKEN",
@@ -157,3 +160,48 @@ def test_invalid_connection_cap_is_rejected(monkeypatch, tmp_path, value):
 
     with pytest.raises(ValueError, match="MAX_CONCURRENT_CONNECTIONS"):
         Config.from_env()
+
+
+def test_concurrent_first_start_publishes_one_complete_token(monkeypatch, tmp_path):
+    clear_env(monkeypatch)
+    token_file = tmp_path / "state" / "token"
+    monkeypatch.setenv("TOKEN_FILE", str(token_file))
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        results = list(executor.map(lambda _: load_or_create_token()[0], range(16)))
+
+    assert len(set(results)) == 1
+    assert token_file.read_text(encoding="utf-8").strip() == results[0]
+    assert len(results[0]) >= 24
+    assert list(token_file.parent.glob(f".{token_file.name}.*")) == []
+
+
+def test_token_target_is_published_only_after_temp_file_is_complete(monkeypatch, tmp_path):
+    clear_env(monkeypatch)
+    token_file = tmp_path / "state" / "token"
+    monkeypatch.setenv("TOKEN_FILE", str(token_file))
+    real_link = config_mod.os.link
+    observations = []
+
+    def checked_link(source, target):
+        source_path = Path(source)
+        target_path = Path(target)
+        observations.append((target_path.exists(), source_path.read_text().strip()))
+        return real_link(source, target)
+
+    monkeypatch.setattr(config_mod.os, "link", checked_link)
+    token, persisted = load_or_create_token()
+
+    assert persisted == token_file
+    assert observations == [(False, token)]
+    assert token_file.read_text().strip() == token
+
+
+def test_incomplete_existing_token_fails_closed(monkeypatch, tmp_path):
+    clear_env(monkeypatch)
+    token_file = tmp_path / "token"
+    token_file.write_text("short\n", encoding="utf-8")
+    monkeypatch.setenv("TOKEN_FILE", str(token_file))
+
+    with pytest.raises(ValueError, match="at least 24 characters"):
+        load_or_create_token()

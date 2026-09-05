@@ -12,6 +12,8 @@ Authorization: Bearer <access-token>
 
 All JSON request bodies must be objects. The default maximum body size is 1 MiB.
 
+`HEAD` is supported for GET resources and returns the same status/headers without a body. `OPTIONS` returns a resource-accurate `Allow` header and no response body. `TRACE` is explicitly disabled with `405`; it is never advertised in `Allow`. The `Server` header does not expose the application or Python version.
+
 ## Error format
 
 ```json
