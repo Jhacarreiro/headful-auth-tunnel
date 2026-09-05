@@ -10,10 +10,13 @@ Group=headful-auth-tunnel
 WorkingDirectory=/opt/headful-auth-tunnel
 EnvironmentFile=-/etc/headful-auth-tunnel.env
 Environment=PROFILE_DIR=/var/lib/headful-auth-tunnel/profile
+Environment=RUNTIME_DIR=/run/headful-auth-tunnel
 Environment=TOKEN_FILE=/var/lib/headful-auth-tunnel/token
 ExecStart=/opt/headful-auth-tunnel/scripts/run-foreground.sh /opt/headful-auth-tunnel/.venv/bin/headful-auth-tunnel
 Restart=on-failure
 RestartSec=5
+RuntimeDirectory=headful-auth-tunnel
+RuntimeDirectoryMode=0750
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

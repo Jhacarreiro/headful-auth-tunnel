@@ -134,4 +134,6 @@ By default, snapshots omit field values. The authenticated operator can request 
 
 The process defaults to `127.0.0.1:19192`. Remote access should use a trusted LAN, VPN, SSH forwarding or a reverse proxy with TLS.
 
-The Docker image binds inside the container to `0.0.0.0:19192`, while the example Compose file publishes it only on host loopback. The systemd example runs under a dedicated user and restricts writable paths to the persistent state directory.
+The Docker image binds inside the container to `0.0.0.0:19192`, while the example Compose file publishes it only on host loopback. The systemd example runs under a dedicated user, restricts persistent writes to the state directory, and uses `RuntimeDirectory=headful-auth-tunnel` for ephemeral PID files under `/run/headful-auth-tunnel`.
+
+SIGTERM/SIGINT handlers are installed before browser startup. A shutdown requested during startup interrupts the controller wait and then lets the browser worker finish/close through the same ownership-aware path used during normal service shutdown. Managed mode closes the browser session it owns; CDP mode only stops the Playwright attachment and deliberately never calls `browser.close()` on the external Chromium. The foreground wrapper records both tunnel and Xvfb PIDs, waits for graceful child termination before escalation, treats zombies as exited, and removes PID files after cleanup.

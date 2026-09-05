@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.8 - 2026-09-05
+
+### Graceful shutdown and lifecycle tracking
+
+- Install SIGTERM/SIGINT handlers before browser startup so shutdown requests during startup follow the same cleanup path as requests received while serving.
+- Make browser startup waits interruptible and ensure controller shutdown is bounded and visible when the browser worker cannot stop promptly.
+- Preserve browser ownership semantics during shutdown: managed mode closes the browser it owns, while CDP mode only detaches Playwright and never calls `browser.close()` on the external Chromium.
+- Make `run-foreground.sh` record both tunnel and Xvfb PID files before waiting, clean them only after child shutdown, and escalate only after a bounded graceful-stop window.
+- Make lifecycle scripts treat zombie processes as exited and make `stop.sh` continue checking Xvfb even when the tunnel PID is stale or fails ownership validation.
+- Use systemd `RuntimeDirectory=headful-auth-tunnel` for ephemeral PID state under `/run/headful-auth-tunnel`.
+
 ## 0.4.7 - 2026-09-05
 
 ### Security compatibility hardening

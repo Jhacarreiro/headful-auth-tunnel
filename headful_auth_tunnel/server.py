@@ -6,6 +6,7 @@ import logging
 import queue
 import re
 import secrets
+import signal
 import ssl
 import threading
 import time
@@ -831,10 +832,16 @@ class BrowserController:
         self._thread = threading.Thread(target=self._run, name="browser-worker", daemon=True)
         self._startup_error: BaseException | None = None
 
-    def start(self) -> None:
+    def start(self, stop_event: threading.Event | None = None) -> None:
         self._thread.start()
-        if not self._ready.wait(timeout=90):
-            raise RuntimeError("Browser worker did not become ready")
+        deadline = time.monotonic() + 90
+        while not self._ready.is_set():
+            if stop_event is not None and stop_event.is_set():
+                raise RuntimeError("Browser startup interrupted by shutdown signal")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError("Browser worker did not become ready")
+            self._ready.wait(timeout=min(0.25, remaining))
         if self._startup_error is not None:
             raise RuntimeError("Browser worker failed to start") from self._startup_error
 
@@ -870,10 +877,13 @@ class BrowserController:
 
     def close(self) -> None:
         try:
-            self._queue.put_nowait(None)
+            self._queue.put(None, timeout=2)
         except queue.Full:
+            LOGGER.warning("Browser command queue remained full during shutdown")
             return
-        self._thread.join(timeout=10)
+        self._thread.join(timeout=30)
+        if self._thread.is_alive():
+            LOGGER.warning("Browser worker did not stop within 30 seconds")
 
 
 def make_handler(config: Config, controller: BrowserController, sessions: SessionStore):
@@ -1378,40 +1388,80 @@ def main() -> None:
     except ValueError as exc:
         raise SystemExit(f"Configuration error: {exc}") from exc
 
+    stop_event = threading.Event()
+    server_ref: list[TunnelHTTPServer | None] = [None]
+    serving = threading.Event()
+    old_handlers: dict[int, object] = {}
+
+    def _handle_signal(signum, _frame):
+        LOGGER.info("Received signal %s; initiating graceful shutdown", signum)
+        stop_event.set()
+        server = server_ref[0]
+        if server is not None and serving.is_set():
+            threading.Thread(
+                target=server.shutdown,
+                name="http-shutdown",
+                daemon=True,
+            ).start()
+
+    for signum in (signal.SIGTERM, signal.SIGINT):
+        old_handlers[signum] = signal.getsignal(signum)
+        signal.signal(signum, _handle_signal)
+
     controller = BrowserController(config)
-    controller.start()
-    sessions = SessionStore(config.auth_token, config.session_ttl_seconds)
-    server = TunnelHTTPServer(
-        (config.bind_host, config.port),
-        make_handler(config, controller, sessions),
-        max_concurrent_connections=config.max_concurrent_connections,
-    )
-
-    if config.tls_enabled:
-        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        context.minimum_version = ssl.TLSVersion.TLSv1_2
-        context.load_cert_chain(str(config.tls_cert), str(config.tls_key))
-        server.socket = context.wrap_socket(server.socket, server_side=True)
-
-    scheme = "https" if config.tls_enabled else "http"
-    LOGGER.info(
-        "Headful Auth Tunnel listening on %s://%s:%s",
-        scheme,
-        config.bind_host,
-        config.port,
-    )
-    if config.token_file:
-        LOGGER.info("Authentication token file: %s", config.token_file)
-    else:
-        LOGGER.info("Authentication token supplied through AUTH_TOKEN")
-
+    server: TunnelHTTPServer | None = None
     try:
-        server.serve_forever(poll_interval=0.5)
-    except KeyboardInterrupt:
-        pass
+        try:
+            controller.start(stop_event)
+        except RuntimeError:
+            if stop_event.is_set():
+                LOGGER.info("Shutdown requested during browser startup; cleaning up")
+                return
+            raise
+
+        if stop_event.is_set():
+            return
+
+        sessions = SessionStore(config.auth_token, config.session_ttl_seconds)
+        server = TunnelHTTPServer(
+            (config.bind_host, config.port),
+            make_handler(config, controller, sessions),
+            max_concurrent_connections=config.max_concurrent_connections,
+        )
+        server_ref[0] = server
+
+        if config.tls_enabled:
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.minimum_version = ssl.TLSVersion.TLSv1_2
+            context.load_cert_chain(str(config.tls_cert), str(config.tls_key))
+            server.socket = context.wrap_socket(server.socket, server_side=True)
+
+        scheme = "https" if config.tls_enabled else "http"
+        LOGGER.info(
+            "Headful Auth Tunnel listening on %s://%s:%s",
+            scheme,
+            config.bind_host,
+            config.port,
+        )
+        if config.token_file:
+            LOGGER.info("Authentication token file: %s", config.token_file)
+        else:
+            LOGGER.info("Authentication token supplied through AUTH_TOKEN")
+
+        if stop_event.is_set():
+            return
+
+        serving.set()
+        try:
+            server.serve_forever(poll_interval=0.5)
+        finally:
+            serving.clear()
     finally:
-        server.server_close()
+        if server is not None:
+            server.server_close()
         controller.close()
+        for signum, handler in old_handlers.items():
+            signal.signal(signum, handler)
 
 
 if __name__ == "__main__":
