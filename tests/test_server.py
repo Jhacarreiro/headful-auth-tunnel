@@ -88,6 +88,84 @@ def raw_request(server, payload: bytes) -> bytes:
         sock.close()
 
 
+def test_server_banner_does_not_expose_app_or_python_version(make_config):
+    server, thread = start_server(make_config())
+    try:
+        status, headers, _ = request(server, "GET", "/health")
+        assert status == 200
+        assert headers["Server"] == "HeadfulAuthTunnel"
+        assert "Python" not in headers["Server"]
+        assert "0.4." not in headers["Server"]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_head_matches_get_headers_without_body(make_config):
+    server, thread = start_server(make_config())
+    try:
+        get_status, get_headers, get_body = request(server, "GET", "/health")
+        head_status, head_headers, head_body = request(server, "HEAD", "/health")
+        assert head_status == get_status == 200
+        assert head_body == b""
+        assert head_headers["Content-Length"] == get_headers["Content-Length"]
+        assert int(head_headers["Content-Length"]) == len(get_body)
+        assert head_headers["Content-Type"] == get_headers["Content-Type"]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_options_reports_resource_accurate_methods_without_content_length(make_config):
+    server, thread = start_server(make_config())
+    try:
+        status, headers, payload = request(server, "OPTIONS", "/page")
+        assert status == 204
+        assert payload == b""
+        assert "Content-Length" not in headers
+        assert "Content-Type" not in headers
+        assert headers["Allow"] == "GET, HEAD, POST, OPTIONS"
+        assert headers["X-Content-Type-Options"] == "nosniff"
+        assert "Content-Security-Policy" in headers
+
+        status, headers, _ = request(server, "OPTIONS", "/pointer/down")
+        assert status == 204
+        assert headers["Allow"] == "POST, OPTIONS"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_trace_is_disabled_and_never_advertised(make_config):
+    server, thread = start_server(make_config())
+    try:
+        status, headers, payload = request(server, "TRACE", "/meta")
+        assert status == 405
+        assert payload == b""
+        assert headers["Allow"] == "GET, HEAD, OPTIONS"
+        assert "TRACE" not in headers["Allow"]
+        assert headers["Server"] == "HeadfulAuthTunnel"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_options_unknown_resource_is_404(make_config):
+    server, thread = start_server(make_config())
+    try:
+        status, _, payload = request(server, "OPTIONS", "/no-such-route")
+        assert status == 404
+        assert json.loads(payload) == {"error": "Not found"}
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 def test_health_shape_is_unchanged_without_readiness_nonce(make_config):
     server, thread = start_server(make_config())
     try:
