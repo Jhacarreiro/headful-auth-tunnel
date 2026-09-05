@@ -289,7 +289,10 @@ Reference files are under `deploy/systemd/`. The expected layout is:
 /opt/headful-auth-tunnel
 /etc/headful-auth-tunnel.env
 /var/lib/headful-auth-tunnel
+/run/headful-auth-tunnel   # created automatically by systemd for PID state
 ```
+
+The unit uses systemd `RuntimeDirectory=` for ephemeral `tunnel.pid`/`xvfb.pid` state. `run-foreground.sh` forwards termination to the tunnel, waits for graceful cleanup before escalating, and removes PID files only after the children are gone. SIGTERM/SIGINT are handled by the Python process even during browser startup. In managed mode shutdown closes the owned browser session; in CDP mode it only detaches from the external Chromium.
 
 Create a dedicated `headful-auth-tunnel` user, install the virtual environment under `/opt/headful-auth-tunnel/.venv`, copy the unit to `/etc/systemd/system/`, then enable it:
 
