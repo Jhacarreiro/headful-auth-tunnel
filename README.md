@@ -1,5 +1,7 @@
 # headful-auth-tunnel
 
+Operate a persistent headful Chromium session remotely when human authentication or intervention is needed. This self-hosted control tunnel is intended for trusted hosts or private networks, never direct public internet exposure.
+
 A small, self-hosted remote-control tunnel for **human-operated headful browser sessions**, either with a tunnel-owned persistent Chromium profile or by attaching to an externally owned Chromium over CDP.
 
 It is useful when automation runs on a headless machine, but a person must occasionally open the real browser, authenticate an account they are authorised to use, and leave the resulting profile available for later permitted automation.
