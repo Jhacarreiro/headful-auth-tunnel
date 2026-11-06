@@ -43,17 +43,19 @@ def _raw_hostname(netloc: str) -> str | None:
     return hostinfo or None
 
 
-def _canonical_hostname(parsed) -> tuple[str | None, ipaddress._BaseAddress | None, str | None]:
+def _canonical_hostname(
+    parsed, *, strip_trailing_dot: bool = True
+) -> tuple[str | None, ipaddress._BaseAddress | None, str | None]:
     raw_host = _raw_hostname(parsed.netloc)
     if not raw_host:
         return None, None, "URL must include a hostname"
 
-    raw_host = raw_host.rstrip(".")
-    if not raw_host:
+    bare_host = raw_host.rstrip(".")
+    if not bare_host:
         return None, None, "URL must include a hostname"
 
     try:
-        direct_ip = ipaddress.ip_address(raw_host)
+        direct_ip = ipaddress.ip_address(bare_host)
     except ValueError:
         direct_ip = None
 
@@ -63,7 +65,7 @@ def _canonical_hostname(parsed) -> tuple[str | None, ipaddress._BaseAddress | No
     try:
         hostname = (
             idna.encode(
-                raw_host,
+                bare_host if strip_trailing_dot else raw_host,
                 uts46=True,
                 transitional=False,
                 std3_rules=True,
@@ -74,6 +76,25 @@ def _canonical_hostname(parsed) -> tuple[str | None, ipaddress._BaseAddress | No
     except (UnicodeError, idna.IDNAError):
         return None, None, "Hostname is not valid UTS #46 IDNA"
     return hostname, None, None
+
+
+def http_origin(url: str) -> tuple[str, str, int] | None:
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port
+    except ValueError:
+        return None
+
+    default_port = {"http": 80, "https": 443}.get(parsed.scheme)
+    if default_port is None:
+        return None
+
+    # Keep DNS trailing dots distinct for browser origins, even though they
+    # are equivalent for destination policy and resolution.
+    host, _, _ = _canonical_hostname(parsed, strip_trailing_dot=False)
+    if host is None:
+        return None
+    return parsed.scheme, host, port if port is not None else default_port
 
 
 def _blocked_ip(address: str) -> bool:

@@ -197,6 +197,20 @@ The final remaining tab cannot be closed.
 {"selector":"input[name=otp]","key":"Enter"}
 ```
 
+### `POST /dom/submit`
+
+    {"url":"https://example.com/search","selector":"input[name=query]","value":"example","settle_ms":500}
+
+Navigates the current tab, fills one main-frame field, presses Enter, and returns
+a page snapshot without field values. Other commands sent through this tunnel
+run before or after the whole operation. The field stays bound to its original
+document. The page must have the requested URL's origin before input, before
+submission and in the returned snapshot. Origin includes scheme, host and port.
+
+`settle_ms` is an optional wait after pressing Enter. It defaults to zero and
+accepts up to 10000 milliseconds. In CDP mode, reserve the enrolled tab for
+the tunnel because direct CDP clients can act outside its command queue.
+
 ### `POST /dom/select`
 
 ```json

@@ -19,7 +19,7 @@ from urllib.parse import parse_qs, urljoin, urlsplit
 
 from .browser import make_browser_backend
 from .config import Config
-from .security import NavigationPolicy, bearer_token, token_from_cookie
+from .security import NavigationPolicy, bearer_token, http_origin, token_from_cookie
 from .sessions import SessionStore
 from .ui import APP_CSS, APP_HTML, APP_JS, LOGIN_HTML
 
@@ -579,7 +579,7 @@ class BrowserSession:
 
         return decision.normalized_url or url
 
-    def navigate(self, url: str) -> dict[str, Any]:
+    def _navigate(self, url: str, timeout_ms: int):
         decision = self.policy.validate(url, refresh=True)
         if not decision.allowed:
             raise RequestError(403, decision.reason)
@@ -587,9 +587,13 @@ class BrowserSession:
         page.goto(
             decision.normalized_url or url,
             wait_until="domcontentloaded",
-            timeout=self.config.navigation_timeout_ms,
+            timeout=timeout_ms,
         )
         self._check_final_url(page)
+        return page, decision.normalized_url or url
+
+    def navigate(self, url: str) -> dict[str, Any]:
+        self._navigate(url, self.config.navigation_timeout_ms)
         return self.meta()
 
     def reload(self) -> dict[str, Any]:
@@ -756,12 +760,67 @@ class BrowserSession:
             raise RequestError(400, "Selector must contain between 1 and 1000 characters")
         return selector
 
+    def submit_form(self, url: str, selector: str, value: str, settle_ms: int) -> dict[str, Any]:
+        if not all(isinstance(argument, str) for argument in (url, selector, value)):
+            raise RequestError(400, "url, selector, and value must be strings")
+        selector = self._validate_selector(selector)
+        if len(value) > self.config.max_type_text_chars:
+            raise RequestError(400, "Form value is too long")
+        if type(settle_ms) is not int or not 0 <= settle_ms <= 10000:
+            raise RequestError(400, "settle_ms must be an integer from 0 to 10000")
+
+        deadline = time.monotonic() + 45
+
+        def remaining(limit: int) -> int:
+            available = int((deadline - time.monotonic()) * 1000)
+            if available <= 0:
+                raise RequestError(504, "Form submission timed out")
+            return min(available, limit)
+
+        page, target = self._navigate(url, remaining(self.config.navigation_timeout_ms))
+        expected_origin = http_origin(target)
+        if expected_origin is None:
+            raise RequestError(400, "Form URL must have an HTTP origin")
+
+        def check_origin(current_url: str) -> None:
+            if http_origin(current_url) != expected_origin:
+                raise RequestError(409, "Form page changed origin")
+
+        check_origin(page.url)
+        field = page.wait_for_selector(selector, timeout=remaining(10000))
+        if field is None:
+            raise RequestError(409, "Form field is unavailable")
+
+        # Keep the field in this document. A locator could match a replacement
+        # field after an external navigation and send input to the new document.
+        try:
+            if field.owner_frame() != page.main_frame:
+                raise RequestError(409, "Form field must be in the main frame")
+            check_origin(page.url)
+            field.fill(value, timeout=remaining(10000))
+            check_origin(page.url)
+            field.press("Enter", timeout=remaining(10000))
+        finally:
+            with contextlib.suppress(Exception):
+                field.dispose()
+
+        if settle_ms:
+            if remaining(settle_ms) < settle_ms:
+                raise RequestError(504, "Form submission timed out")
+            page.wait_for_timeout(settle_ms)
+        snapshot = self.page_snapshot(page=page)
+        check_origin(snapshot.get("url", ""))
+        return snapshot
+
     def page_snapshot(
         self,
         include_values: bool = False,
         include_sensitive_values: bool = False,
+        *,
+        page=None,
     ) -> dict[str, Any]:
-        page = self._current_page()
+        if page is None:
+            page = self._current_page()
         self._check_final_url(page)
         return page.evaluate(
             """({elementLimit, textLimit, includeValues, includeSensitiveValues}) => {
@@ -1075,6 +1134,7 @@ def make_handler(config: Config, controller: BrowserController, sessions: Sessio
                 "/dom/fill",
                 "/dom/press",
                 "/dom/select",
+                "/dom/submit",
                 "/drag",
                 "/history/back",
                 "/history/forward",
@@ -1316,6 +1376,14 @@ def make_handler(config: Config, controller: BrowserController, sessions: Sessio
                     "dom_press",
                     selector=str(body.get("selector", "")),
                     key=str(body.get("key", "")),
+                )
+            elif path == "/dom/submit":
+                result = controller.call(
+                    "submit_form",
+                    url=body.get("url"),
+                    selector=body.get("selector"),
+                    value=body.get("value"),
+                    settle_ms=body.get("settle_ms", 0),
                 )
             elif path == "/dom/select":
                 result = controller.call(
