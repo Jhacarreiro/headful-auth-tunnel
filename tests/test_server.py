@@ -720,8 +720,12 @@ class FormPage(FakePage):
         self.fill_started = threading.Event()
         self.release_fill = threading.Event()
         self.change_origin_at = None
+        self.serialized_url = None
         self.value = None
         self.submitted = False
+
+    def goto(self, url, **kwargs):
+        super().goto(self.serialized_url or url, **kwargs)
 
     def wait_for_selector(self, selector, **kwargs):
         if self.change_origin_at == "selector":
@@ -741,7 +745,7 @@ class FormPage(FakePage):
     def press(self, key, **kwargs):
         assert key == "Enter"
         self.submitted = True
-        self.url = OTHER_URL if self.change_origin_at == "submit" else FORM_URL + "/result"
+        self.url = OTHER_URL if self.change_origin_at == "submit" else self.url + "/result"
 
     def evaluate(self, expression, params):
         return {"url": self.url, "text": self.value if self.submitted else ""}
@@ -756,7 +760,9 @@ def form_server(make_config, monkeypatch):
         session.context = types.SimpleNamespace(pages=[page])
 
     monkeypatch.setattr(BrowserSession, "start", start)
-    config = make_config(allowed_hosts=("192.0.2.10", "192.0.2.11"))
+    config = make_config(
+        allowed_hosts=("192.0.2.10", "192.0.2.11", "xn--bcher-kva.example", "2001:db8::1")
+    )
     controller = BrowserController(config)
     controller.start()
     server, thread = start_server(config, controller)
@@ -819,6 +825,40 @@ def test_submit_form_rejects_a_document_on_another_origin(form_server, change_or
     if change_origin_at == "selector":
         assert page.value is None
         assert not page.submitted
+
+
+@pytest.mark.parametrize(
+    ("requested", "serialized"),
+    [
+        ("https://b\u00fccher.example/search", "https://xn--bcher-kva.example/search"),
+        ("https://[2001:0db8:0:0:0:0:0:1]:443/search", "https://[2001:db8::1]/search"),
+    ],
+)
+def test_submit_form_accepts_browser_canonical_origin(form_server, requested, serialized):
+    page, _, post = form_server
+    page.serialized_url = serialized
+    page.release_fill.set()
+
+    status, snapshot = post(
+        "/dom/submit", {"url": requested, "selector": "input", "value": "sample"}
+    )
+
+    assert status == 200
+    assert snapshot == {"url": serialized + "/result", "text": "sample"}
+
+
+def test_submit_form_distinguishes_dns_trailing_dot_origin(form_server):
+    page, _, post = form_server
+    page.serialized_url = "https://xn--bcher-kva.example./search"
+    page.release_fill.set()
+
+    status, _ = post(
+        "/dom/submit",
+        {"url": "https://xn--bcher-kva.example/search", "selector": "input", "value": "sample"},
+    )
+
+    assert status == 409
+    assert page.value is None
 
 
 class _ClosableSession:

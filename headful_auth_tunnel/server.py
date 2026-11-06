@@ -19,7 +19,7 @@ from urllib.parse import parse_qs, urljoin, urlsplit
 
 from .browser import make_browser_backend
 from .config import Config
-from .security import NavigationPolicy, bearer_token, token_from_cookie
+from .security import NavigationPolicy, bearer_token, http_origin, token_from_cookie
 from .sessions import SessionStore
 from .ui import APP_CSS, APP_HTML, APP_JS, LOGIN_HTML
 
@@ -760,13 +760,6 @@ class BrowserSession:
             raise RequestError(400, "Selector must contain between 1 and 1000 characters")
         return selector
 
-    @staticmethod
-    def _http_origin(url: str) -> tuple[str, str | None, int | None]:
-        parts = urlsplit(url)
-        default_port = {"http": 80, "https": 443}.get(parts.scheme)
-        port = parts.port
-        return parts.scheme, parts.hostname, port if port is not None else default_port
-
     def submit_form(self, url: str, selector: str, value: str, settle_ms: int) -> dict[str, Any]:
         if not all(isinstance(argument, str) for argument in (url, selector, value)):
             raise RequestError(400, "url, selector, and value must be strings")
@@ -785,10 +778,12 @@ class BrowserSession:
             return min(available, limit)
 
         page, target = self._navigate(url, remaining(self.config.navigation_timeout_ms))
-        expected_origin = self._http_origin(target)
+        expected_origin = http_origin(target)
+        if expected_origin is None:
+            raise RequestError(400, "Form URL must have an HTTP origin")
 
         def check_origin(current_url: str) -> None:
-            if self._http_origin(current_url) != expected_origin:
+            if http_origin(current_url) != expected_origin:
                 raise RequestError(409, "Form page changed origin")
 
         check_origin(page.url)
